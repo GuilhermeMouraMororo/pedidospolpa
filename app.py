@@ -520,14 +520,17 @@ class OrderSession:
         self.current_db = deepcopy(products_db)
         self.confirmed_orders = []
         self.pending_orders = []
-        
         self.state = "collecting"
         self.reminder_count = 0
         self.message_queue = queue.Queue()
         self.active_timer = None
         self.last_activity = time.time()
         self.waiting_for_option = False
-    
+
+     def save(self):
+        """Save session to database"""
+        save_session_to_db(self)
+        
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
         self.current_db = deepcopy(self.products_db)
@@ -539,8 +542,7 @@ class OrderSession:
         self.message_queue.put("🔄 **Conversa reiniciada!**")
         
     def add_item(self, parsed_orders):
-        """Add parsed items to current database - simplified"""
-        # This method is now mostly for internal use, not for generating responses
+        """Add parsed items to current database with auto-save"""
         for order in parsed_orders:
             for idx, (product, _) in enumerate(self.current_db):
                 if product == order["product"]:
@@ -548,6 +550,7 @@ class OrderSession:
                     break
         
         self.state = "collecting"
+        self.save()  # Auto-save after modification
         self._start_inactivity_timer()
 
     def reset_cycle(self, parsed_orders):
@@ -794,6 +797,8 @@ class OrderSession:
                     return {'success': False, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
         
         # Default fallback
+        self.save()
+        
         return {'success': False, 'message': "Estado não reconhecido. Digite 'cancelar' para reiniciar."}
         
     def has_items(self):
