@@ -475,78 +475,16 @@ class OrderSession:
         self.last_activity = time.time()
         self.waiting_for_option = False
 
-    def get_all_public_orders(self):
-        """Get ALL public orders from database (everyone sees these)"""
-        try:
-            conn = get_db_connection()
-            if conn is None:
-                return {"confirmed": {}, "pending": {}}
-                
-            cur = conn.cursor()
-            
-            # Get confirmed orders
-            cur.execute('''
-                SELECT product, SUM(quantity) as total_quantity 
-                FROM orders 
-                WHERE order_type = 'confirmed'
-                GROUP BY product 
-                ORDER BY product
-            ''')
-            confirmed_orders = {}
-            for product, total in cur.fetchall():
-                if total > 0:
-                    confirmed_orders[product] = total
-            
-            # Get pending orders  
-            cur.execute('''
-                SELECT product, SUM(quantity) as total_quantity 
-                FROM orders 
-                WHERE order_type = 'pending'
-                GROUP BY product 
-                ORDER BY product
-            ''')
-            pending_orders = {}
-            for product, total in cur.fetchall():
-                if total > 0:
-                    pending_orders[product] = total
-            
-            cur.close()
-            conn.close()
-            
-            return {
-                "confirmed": confirmed_orders,
-                "pending": pending_orders
-            }
-            
-        except Exception as e:
-            print(f"Error loading public orders: {e}")
-            return {"confirmed": {}, "pending": {}}
+    def start_new_conversation(self):
+    """Reset for a new conversation and wait for next message"""
+    self.current_db = deepcopy(self.products_db)
+    self.state = "waiting_for_next"
+    self.reminder_count = 0
+    self.waiting_for_option = False
+    self._cancel_timer()
+    # Put the restart message in queue
+    self.message_queue.put("🔄 **Conversa reiniciada!**")
 
-    def save_public_orders(self, orders_list, order_type="confirmed"):
-        """Save orders to public database"""
-        conn = get_db_connection()
-        if conn is None:
-            print("No database connection available")
-            return False
-            
-        try:
-            cur = conn.cursor()
-            for order in orders_list:
-                for product, qty in order.items():
-                    if qty > 0:
-                        cur.execute(
-                            'INSERT INTO orders (session_id, product, quantity, order_type) VALUES (%s, %s, %s, %s)',
-                            (self.session_id, product, qty, order_type)
-                        )
-            conn.commit()
-            cur.close()
-            conn.close()
-            print(f"Saved {len(orders_list)} orders as {order_type}")
-            return True
-        except Exception as e:
-            print(f"Error saving to database: {e}")
-            return False
-        
     # === SIMPLE ORDER MANAGEMENT ===
     def add_item(self, parsed_orders):
         """Add parsed items to current session"""
@@ -772,15 +710,10 @@ class OrderSession:
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
                 self._cancel_timer()
                 confirmed_order = self.get_current_orders()
-                # Save to PUBLIC database
-                # When marking as pending, replace with:
-                pending_order = self.get_current_orders()
-                # Save to PUBLIC database as pending
-                self.save_public_orders([pending_order], "pending")
-                self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
+                # Save to PUBLIC database as confirmed
+                self.save_public_orders([confirmed_order], "confirmed")
                 self._reset_current()
-                self.state = "pending_confirmation"
-
+                
                 response = "✅ **PEDIDO CONFIRMADO COM SUCESSO!**\n\n**Itens confirmados:**\n"
                 for product, qty in confirmed_order.items():
                     if qty > 0:
@@ -932,18 +865,21 @@ def send_message():
     
     session = get_user_session(session_id)
     result = session.process_message(message)
-
-    if result.get('message'):
-        response['bot_message'] = result['message']
     
-    # In /send_message route, replace the return statement with:
+    # Get ALL public orders from database
     public_orders = session.get_all_public_orders()
-    return jsonify({
+    
+    response = {
         'status': session.state,
         'current_orders': session.get_current_orders(),
         'confirmed_orders': public_orders["confirmed"],
         'pending_orders': public_orders["pending"]
-    })
+    }
+    
+    if result.get('message'):
+        response['bot_message'] = result['message']
+    
+    return jsonify(response)
 
 @app.route("/get_updates", methods=["POST"])
 def get_updates():
