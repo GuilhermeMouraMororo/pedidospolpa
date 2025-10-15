@@ -527,7 +527,7 @@ class OrderSession:
         self.last_activity = time.time()
         self.waiting_for_option = False
 
-     def save(self):
+    def save(self):
         """Save session to database"""
         save_session_to_db(self)
         
