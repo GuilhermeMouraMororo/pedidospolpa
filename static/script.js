@@ -1,20 +1,38 @@
 let sessionId = 'default';
 
-function updateOrdersDisplay(orders) {
-    const ordersList = document.getElementById('ordersList');
-    const orderItems = Object.entries(orders);
+function updateOrdersDisplay(data) {
+    const confirmedOrders = document.getElementById('confirmedOrders');
+    const pendingOrders = document.getElementById('pendingOrders');
+    const confirmedCount = document.getElementById('confirmedCount');
+    const pendingCount = document.getElementById('pendingCount');
     
-    if (orderItems.length === 0) {
-        ordersList.innerHTML = '<div class="empty-orders">Nenhum pedido ainda</div>';
-        return;
+    // Update confirmed orders - handle object format
+    if (data.confirmed_orders && Object.keys(data.confirmed_orders).length > 0) {
+        confirmedCount.textContent = Object.keys(data.confirmed_orders).length;
+        confirmedOrders.innerHTML = Object.entries(data.confirmed_orders).map(([product, quantity]) => 
+            `<div class="order-item confirmed-item">
+                <span class="product-name">${product}</span>
+                <span class="product-quantity confirmed-quantity">${quantity}</span>
+            </div>`
+        ).join('');
+    } else {
+        confirmedCount.textContent = '0';
+        confirmedOrders.innerHTML = '<div class="empty-orders">Nenhum pedido confirmado</div>';
     }
     
-    ordersList.innerHTML = orderItems.map(([product, quantity]) => `
-        <div class="order-item">
-            <span class="product-name">${product}</span>
-            <span class="product-quantity">${quantity}</span>
-        </div>
-    `).join('');
+    // Update pending orders - handle object format
+    if (data.pending_orders && Object.keys(data.pending_orders).length > 0) {
+        pendingCount.textContent = Object.keys(data.pending_orders).length;
+        pendingOrders.innerHTML = Object.entries(data.pending_orders).map(([product, quantity]) => 
+            `<div class="order-item pending-item">
+                <span class="product-name">${product}</span>
+                <span class="product-quantity pending-quantity">${quantity}</span>
+            </div>`
+        ).join('');
+    } else {
+        pendingCount.textContent = '0';
+        pendingOrders.innerHTML = '<div class="empty-orders">Nenhum pedido pendente</div>';
+    }
 }
 
 function sendMessage() {
