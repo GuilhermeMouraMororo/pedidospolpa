@@ -9,76 +9,65 @@ import threading
 import uuid
 import queue
 import time
-import sqlite3
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
 # --------- Database setup ----------
 def get_db_connection():
-    """Get database connection with better error handling"""
-    try:
-        database_url = os.environ.get('DATABASE_URL')
-        if database_url:
-            conn = psycopg2.connect(database_url)
-            return conn
-        else:
-            # Fall back to Excel if no database is available
-            print("No DATABASE_URL environment variable found")
-            return None
-    except Exception as e:
-        print(f"Database connection failed: {e}")
-        return None
+    # Render provides DATABASE_URL environment variable
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        # Fallback for local development
+        database_url = "postgresql://username:password@localhost:5432/order_bot"
+    
+    conn = psycopg2.connect(database_url)
+    return conn
 
 def init_db():
-    conn = sqlite3.connect('orders.db')
-    c = conn.cursor()
-    c.execute('''
+    """Initialize database tables"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Create orders table
+    cur.execute('''
         CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_name TEXT NOT NULL,
-            order_details TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(255) NOT NULL,
+            product VARCHAR(255) NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    
+    # Create products table (for your product catalog)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) UNIQUE NOT NULL
+        )
+    ''')
+    
+    # Insert default products if they don't exist
+    default_products = [
+        "limão", "abacaxi", "abacaxi com hortelã", "açaí", "acerola",
+        "ameixa", "cajá", "cajú", "goiaba", "graviola",
+        "manga", "maracujá", "morango", "seriguela", "tamarindo",
+        "caixa de ovos", "ovo", "queijo"
+    ]
+    
+    for product in default_products:
+        cur.execute(
+            'INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO NOTHING',
+            (product,)
+        )
+    
     conn.commit()
+    cur.close()
     conn.close()
-
-def update_db_schema():
-    """Update existing database to add order_type column"""
-    conn = get_db_connection()
-    if conn is None:
-        print("No database connection available for schema update")
-        return
-        
-    try:
-        cur = conn.cursor()
-        
-        # Check if order_type column exists
-        cur.execute('''
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='orders' and column_name='order_type'
-        ''')
-        
-        if not cur.fetchone():
-            print("Adding order_type column to orders table...")
-            cur.execute('ALTER TABLE orders ADD COLUMN order_type VARCHAR(20) DEFAULT \'confirmed\'')
-            conn.commit()
-            print("Database schema updated successfully")
-        else:
-            print("order_type column already exists")
-            
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"Error updating database schema: {e}")
 
 # Initialize database on startup
 init_db()
-update_db_schema()
 
 # ---------- Core Order Processing Functions ----------
 
@@ -433,9 +422,8 @@ class OrderSession:
         self.session_id = session_id
         self.products_db = deepcopy(products_db)
         self.current_db = deepcopy(products_db)
-        
-        # Remove the old confirmed_orders and pending_orders attributes
-        # We'll use the database for all public orders
+        self.confirmed_orders = []
+        self.pending_orders = []
         
         self.state = "collecting"
         self.reminder_count = 0
@@ -443,7 +431,7 @@ class OrderSession:
         self.active_timer = None
         self.last_activity = time.time()
         self.waiting_for_option = False
-
+    
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
         self.current_db = deepcopy(self.products_db)
@@ -453,101 +441,37 @@ class OrderSession:
         self._cancel_timer()
         # Put the restart message in queue
         self.message_queue.put("🔄 **Conversa reiniciada!**")
-
-    # === SIMPLE ORDER MANAGEMENT ===
+        
     def add_item(self, parsed_orders):
-        """Add parsed items to current session"""
+        """Add parsed items to current database - simplified"""
+        # This method is now mostly for internal use, not for generating responses
         for order in parsed_orders:
             for idx, (product, _) in enumerate(self.current_db):
                 if product == order["product"]:
                     self.current_db[idx][1] += order["qty"]
                     break
+        
         self.state = "collecting"
         self._start_inactivity_timer()
 
-    def has_items(self):
-        """Check if there are any items in the current order"""
-        return any(qty > 0 for _, qty in self.current_db)
-    
-    def get_current_orders(self):
-        """Get current session orders as dict"""
-        return {product: qty for product, qty in self.current_db if qty > 0}
-
-    def _reset_current(self):
-        """Reset current session completely"""
-        self.current_db = deepcopy(self.products_db)
+    def reset_cycle(self, parsed_orders):
+        """Reset cycle and add items during confirmation phase - simplified"""
+        self._cancel_timer()
+        
+        for order in parsed_orders:
+            for idx, (product, _) in enumerate(self.current_db):
+                if product == order["product"]:
+                    self.current_db[idx][1] += order["qty"]
+                    break
+        
         self.state = "collecting"
         self.reminder_count = 0
-        self._cancel_timer()
-
-    # === PUBLIC ORDER STORAGE (Database) ===
-    def save_public_orders(self, orders_list, order_type="confirmed"):
-        """Save orders to public database"""
-        conn = get_db_connection()
-        if conn is None:
-            print("No database connection available")
-            return False
+        self._start_inactivity_timer()
             
-        try:
-            cur = conn.cursor()
-            for order in orders_list:
-                for product, qty in order.items():
-                    if qty > 0:
-                        cur.execute(
-                            'INSERT INTO orders (session_id, product, quantity, order_type) VALUES (%s, %s, %s, %s)',
-                            (self.session_id, product, qty, order_type)
-                        )
-            conn.commit()
-            cur.close()
-            conn.close()
-            print(f"Saved {len(orders_list)} orders as {order_type}")
-            return True
-        except Exception as e:
-            print(f"Error saving to database: {e}")
-            return False
-
-    def get_all_public_orders(self):
-        """Get ALL public orders from database (everyone sees these)"""
-        try:
-            conn = get_db_connection()
-            if conn is None:
-                return {"confirmed": {}, "pending": {}}
-                
-            cur = conn.cursor()
-            
-            # Get confirmed orders
-            cur.execute('''
-                SELECT product, SUM(quantity) as total 
-                FROM orders 
-                WHERE order_type = 'confirmed'
-                GROUP BY product 
-                ORDER BY product
-            ''')
-            confirmed = {product: total for product, total in cur.fetchall() if total > 0}
-            
-            # Get pending orders  
-            cur.execute('''
-                SELECT product, SUM(quantity) as total 
-                FROM orders 
-                WHERE order_type = 'pending'
-                GROUP BY product 
-                ORDER BY product
-            ''')
-            pending = {product: total for product, total in cur.fetchall() if total > 0}
-            
-            cur.close()
-            conn.close()
-            
-            return {"confirmed": confirmed, "pending": pending}
-            
-        except Exception as e:
-            print(f"Error loading public orders: {e}")
-            return {"confirmed": {}, "pending": {}}
-
-    # === TIMER AND REMINDER SYSTEM ===
     def _start_inactivity_timer(self):
-        """Start 30-second inactivity timer"""
+        """Start 5-second inactivity timer"""
         self._cancel_timer()
+        print(f"DEBUG: Starting inactivity timer for session {self.session_id}")  # Debug line
         self.active_timer = threading.Timer(30.0, self._send_summary)
         self.active_timer.daemon = True
         self.active_timer.start()
@@ -560,6 +484,8 @@ class OrderSession:
     
     def _send_summary(self):
         """Send summary and start confirmation cycle"""
+        print(f"DEBUG: Timer triggered for session {self.session_id}, state: {self.state}, has_items: {self.has_items()}")  # Debug line
+        
         if self.state == "collecting" and self.has_items():
             self.state = "confirming"
             self.reminder_count = 0
@@ -567,15 +493,17 @@ class OrderSession:
             self.message_queue.put(summary)
             self._start_reminder_cycle()
         elif self.state == "collecting":
+            print(f"DEBUG: No items found, restarting timer for session {self.session_id}")  # Debug line
             self._start_inactivity_timer()
-    
+        
     def _start_reminder_cycle(self):
-        """Start reminder cycle"""
+        """Start reminder cycle - first reminder after 5 seconds"""
         self.reminder_count = 1
-        self._cancel_timer()
+        self._cancel_timer()  # Cancel any existing timers
         self.active_timer = threading.Timer(30.0, self._send_reminder)
         self.active_timer.daemon = True
         self.active_timer.start()
+
     
     def _send_reminder(self):
         """Send a reminder"""
@@ -584,25 +512,25 @@ class OrderSession:
             self.message_queue.put(f"🔔 **LEMBRETE ({self.reminder_count}/5):**\n{summary}")
             
             if self.reminder_count == 5:
-                # After 5th reminder, mark as pending in PUBLIC database
+                # After 5th reminder, mark as pending
                 self._mark_as_pending()
             else:
+                # Schedule next reminder after 5 seconds
                 self.reminder_count += 1
                 self._cancel_timer()
                 self.active_timer = threading.Timer(30.0, self._send_reminder)
                 self.active_timer.daemon = True
                 self.active_timer.start()
-
+    
     def _mark_as_pending(self):
-        """Mark current order as pending in PUBLIC database"""
+        """Mark current order as pending"""
         if self.has_items():
             pending_order = self.get_current_orders()
-            # Save to PUBLIC database
-            self.save_public_orders([pending_order], "pending")
+            self.pending_orders.append(pending_order)
             self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
             self._reset_current()
             self.state = "pending_confirmation"
-
+    
     def _build_summary(self):
         """Build summary message"""
         summary = "📋 **RESUMO DO SEU PEDIDO:**\n"
@@ -611,66 +539,93 @@ class OrderSession:
                 summary += f"• {product}: {qty}\n"
         summary += "\n⚠️ **Confirma o pedido?** (responda com 'confirmar' ou 'nao')"
         return summary
-
-    # === MESSAGE PROCESSING ===
+    
+    def _check_cancel_command(self, message_lower):
+        """Check if message contains cancel commands"""
+        cancel_commands = ['cancelar', 'hoje não', 'hoje nao']
+        return any(command in message_lower for command in cancel_commands)
+    
     def process_message(self, message):
         """Process incoming message"""
         message_lower = message.lower().strip()
         self.last_activity = time.time()
         
-        # Check for cancel commands
-        cancel_commands = ['cancelar', 'hoje não', 'hoje nao']
-        if any(command in message_lower for command in cancel_commands):
-            self._reset_current()
-            self.message_queue.put("🔄 **Conversa reiniciada!**")
-            return {'success': True, 'message': None}
+        # Check for cancel commands in ANY state
+        if self._check_cancel_command(message_lower):
+            self.start_new_conversation()
+            return {
+                'success': True,
+                'message': None  # Message already queued
+            }
         
-        # Handle waiting_for_next state
+        # Handle waiting_for_next state (after cancellation, before showing options)
         if self.state == "waiting_for_next":
+            # Now show the option message
             self.state = "option"
             self.waiting_for_option = True
-            return {'success': True, 'message': "🔄 **Conversa reiniciada!**\n\nVocê quer pedir(1) ou falar com o gerente(2)?"}
+            return {
+                'success': True,
+                'message': "🔄 **Conversa reiniciada!**\n\nVocê quer pedir(1) ou falar com o gerente(2)?"
+            }
         
-        # Handle option state
+        # Handle option state (after showing options)
         if self.state == "option" and self.waiting_for_option:
             if message_lower == "1":
                 self.waiting_for_option = False
                 self.state = "collecting"
-                self._start_inactivity_timer()
-                return {'success': True, 'message': "Ótimo! Digite seus pedidos. Ex: '2 mangas e 3 queijos'"}
+                self._start_inactivity_timer()  # Start timer when entering collecting state
+                return {
+                    'success': True,
+                    'message': "Ótimo! Digite seus pedidos. Ex: '2 mangas e 3 queijos'"
+                }
             elif message_lower == "2":
+                # Reset to initial state so the cycle repeats
                 self.waiting_for_option = False
-                self.state = "waiting_for_next"
-                return {'success': True, 'message': "Ok então."}
+                self.state = "waiting_for_next"  # Go back to waiting_for_next state
+                return {
+                    'success': True,
+                    'message': "Ok então."
+                }
             else:
-                return {'success': False, 'message': "Por favor, escolha uma opção: 1 para pedir ou 2 para falar com o gerente."}
+                # Keep prompting for valid option
+                return {
+                    'success': False,
+                    'message': "Por favor, escolha uma opção: 1 para pedir ou 2 para falar com o gerente."
+                }
         
         # Handle pending confirmation state
         if self.state == "pending_confirmation":
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
-                # Move pending orders to confirmed in PUBLIC database
-                public_orders = self.get_all_public_orders()
-                if public_orders["pending"]:
-                    # Convert pending orders to confirmed
-                    pending_list = [{product: qty} for product, qty in public_orders["pending"].items()]
-                    self.save_public_orders(pending_list, "confirmed")
-                    # Clear pending orders (they're now confirmed)
-                    # Note: In a real app, you might want to mark them as confirmed instead of deleting
+                if self.pending_orders:
+                    # Move pending orders to confirmed
+                    self.confirmed_orders.extend(self.pending_orders)
+                    self._save_final_orders(self.pending_orders)
+                    pending_count = len(self.pending_orders)
+                    self.pending_orders = []
                     self.state = "collecting"
-                    self._start_inactivity_timer()
-                    return {'success': True, 'message': "✅ **PEDIDOS PENDENTES CONFIRMADOS!** Adicionados à lista pública."}
+                    self._start_inactivity_timer()  # Start timer when returning to collecting
+                    return {
+                        'success': True,
+                        'message': f"✅ **PEDIDO PENDENTE CONFIRMADO!** {pending_count} pedido(s) adicionado(s) à lista."
+                    }
                 else:
                     self.state = "collecting"
-                    self._start_inactivity_timer()
-                    return {'success': True, 'message': "🔄 Nenhum pedido pendente. Continue adicionando itens."}
+                    self._start_inactivity_timer()  # Start timer when returning to collecting
+                    return {
+                        'success': True,
+                        'message': "🔄 Nenhum pedido pendente. Continue adicionando itens."
+                    }
             else:
-                # Continue with normal order processing
+                # Any other message continues normal collection
                 self.state = "collecting"
-                self._start_inactivity_timer()
+                self._start_inactivity_timer()  # Start timer when entering collecting
+                # Process the message as a normal order
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 self.current_db = updated_db
                 if parsed_orders:
-                    return {'success': True}
+                    return {
+                        'success': True,
+                    }
                 else:
                     return {'success': True, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
         
@@ -679,36 +634,49 @@ class OrderSession:
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
                 self._cancel_timer()
                 confirmed_order = self.get_current_orders()
-                # Save to PUBLIC database as confirmed
-                self.save_public_orders([confirmed_order], "confirmed")
+                self.confirmed_orders.append(confirmed_order)
+                self._save_final_orders([confirmed_order])
                 self._reset_current()
                 
                 response = "✅ **PEDIDO CONFIRMADO COM SUCESSO!**\n\n**Itens confirmados:**\n"
                 for product, qty in confirmed_order.items():
                     if qty > 0:
-                        response += f"• {product}: {qty}\n"
+                        response += f"• {qty}x {product}\n"
                 response += "\nObrigado pelo pedido! 🎉"
-                return {'success': True, 'message': response}
                 
+                return {
+                    'success': True,
+                    'message': response
+                }
             elif any(word in message_lower.split() for word in ['nao', 'não', 'n']):
                 self._cancel_timer()
                 self._reset_current()
-                self._start_inactivity_timer()
-                return {'success': True, 'message': "🔄 **Lista limpa!** Digite novos itens."}
+                self._start_inactivity_timer()  # Start timer when resetting to empty state
+                return {
+                    'success': True, 
+                    'message': "🔄 **Lista limpa!** Digite novos itens."
+                }
             else:
-                # Try to parse as product order
+                # Try to parse as product order during confirmation
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 if parsed_orders:
+                    # Update database directly
                     self.current_db = updated_db
                     self._cancel_timer()
                     self.state = "collecting"
                     self.reminder_count = 0
-                    self._start_inactivity_timer()
-                    return {'success': True}
+                    self._start_inactivity_timer()  # Start timer when returning to collecting
+                    
+                    return {
+                        'success': True,
+                    }
                 else:
-                    return {'success': False, 'message': "❌ Item não reconhecido. Digite 'confirmar' para confirmar ou 'nao' para cancelar."}
+                    return {
+                        'success': False,
+                        'message': "❌ Item não reconhecido. Digite 'confirmar' para confirmar ou 'nao' para cancelar."
+                    }
         
-        # Handle collection state (normal ordering)
+        # Handle collection state
         elif self.state in ["collecting"]:
             if message_lower in ['pronto', 'confirmar']:
                 if self.has_items():
@@ -721,21 +689,75 @@ class OrderSession:
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 self.current_db = updated_db
                 if parsed_orders:
-                    self._start_inactivity_timer()
-                    return {'success': True}
+                    self._start_inactivity_timer()  # Restart timer after adding items
+                    return {
+                        'success': True
+                    }
                 else:
-                    self._start_inactivity_timer()
+                    self._start_inactivity_timer()  # Restart timer even if no items recognized
                     return {'success': False, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
         
         # Default fallback
         return {'success': False, 'message': "Estado não reconhecido. Digite 'cancelar' para reiniciar."}
+        
+    def has_items(self):
+        """Check if there are any items in the order"""
+        return any(qty > 0 for _, qty in self.current_db)
+    
+    def get_current_orders(self):
+        """Get current orders as dict"""
+        return {product: qty for product, qty in self.current_db if qty > 0}
+    
+    def _reset_current(self):
+        """Reset current session (temp items) completely"""
+        self.current_db = deepcopy(self.products_db)
+        self.state = "collecting"
+        self.reminder_count = 0
+        self._cancel_timer()
+    
+    def _save_final_orders(self, orders_list):
+        """Save final confirmed orders to database"""
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        for order in orders_list:
+            for product, qty in order.items():
+                if qty > 0:
+                    cur.execute(
+                        'INSERT INTO orders (session_id, product, quantity) VALUES (%s, %s, %s)',
+                        (self.session_id, product, qty)
+                    )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+    def get_all_orders_summary(self):
+        """Get summary of all orders from database (for Excel download)"""
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute('''
+            SELECT product, SUM(quantity) as total_quantity 
+            FROM orders 
+            GROUP BY product 
+            ORDER BY product
+        ''')
+        
+        orders = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return orders
 
+    
     def get_pending_message(self):
         """Get pending message if any"""
         try:
             return self.message_queue.get_nowait()
         except queue.Empty:
             return None
+
 
 
 def get_user_session(session_id):
@@ -748,128 +770,110 @@ def get_user_session(session_id):
 
 
 # ---------- Flask routes ----------
-@app.route('/')
+@app.route("/")
 def index():
-    return redirect(url_for('orders'))
+    session_id = request.args.get('session_id', str(uuid.uuid4()))
+    return render_template("index.html", session_id=session_id)
 
-@app.route('/orders')
-def orders():
-    # Get all orders
-    conn = sqlite3.connect('orders.db')
-    c = conn.cursor()
+@app.route("/download_excel", methods=["GET"])
+def download_excel():
+    """Generate Excel file from database"""
+    from openpyxl import Workbook
+    from io import BytesIO
     
-    # Get pending orders
-    c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
-    pending_orders = c.fetchall()
+    session_id = request.args.get("session_id", "default")
+    session = get_user_session(session_id)
     
-    # Get completed orders
-    c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
-    completed_orders = c.fetchall()
+    # Get all orders from database
+    orders = session.get_all_orders_summary()
     
-    conn.close()
+    # Create Excel file in memory
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Produto", "Quantidade"])
     
-    return render_template('orders.html', 
-                         pending_orders=pending_orders,
-                         completed_orders=completed_orders)
-    
-@app.route('/')
-def index():
-    return redirect(url_for('orders'))
-
-@app.route('/orders')
-def orders():
-    # Get all orders
-    conn = sqlite3.connect('orders.db')
-    c = conn.cursor()
-    
-    # Get pending orders
-    c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
-    pending_orders = c.fetchall()
-    
-    # Get completed orders
-    c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
-    completed_orders = c.fetchall()
-    
-    conn.close()
-    
-    return render_template('orders.html', 
-                         pending_orders=pending_orders,
-                         completed_orders=completed_orders)
-
-@app.route('/add_order', methods=['POST'])
-def add_order():
-    if request.method == 'POST':
-        customer_name = request.form.get('customer_name', '').strip()
-        order_details = request.form.get('order_details', '').strip()
-        
-        if customer_name and order_details:
-            conn = sqlite3.connect('orders.db')
-            c = conn.cursor()
-            c.execute(
-                "INSERT INTO orders (customer_name, order_details) VALUES (?, ?)",
-                (customer_name, order_details)
-            )
-            conn.commit()
-            conn.close()
-        
-        return redirect(url_for('orders'))
-
-@app.route('/update_order_status/<int:order_id>', methods=['POST'])
-def update_order_status(order_id):
-    new_status = request.form.get('status')
-    
-    if new_status in ['pending', 'completed']:
-        conn = sqlite3.connect('orders.db')
-        c = conn.cursor()
-        c.execute(
-            "UPDATE orders SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (new_status, order_id)
-        )
-        conn.commit()
-        conn.close()
-    
-    return redirect(url_for('orders'))
-
-@app.route('/delete_order/<int:order_id>', methods=['POST'])
-def delete_order(order_id):
-    conn = sqlite3.connect('orders.db')
-    c = conn.cursor()
-    c.execute("DELETE FROM orders WHERE id = ?", (order_id,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for('orders'))
-
-@app.route('/api/orders')
-def api_orders():
-    status = request.args.get('status', 'all')
-    
-    conn = sqlite3.connect('orders.db')
-    c = conn.cursor()
-    
-    if status == 'pending':
-        c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
-    elif status == 'completed':
-        c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
-    else:
-        c.execute("SELECT * FROM orders ORDER BY created_at DESC")
-    
-    orders = c.fetchall()
-    conn.close()
-    
-    # Convert to list of dictionaries for JSON
-    orders_list = []
     for order in orders:
-        orders_list.append({
-            'id': order[0],
-            'customer_name': order[1],
-            'order_details': order[2],
-            'status': order[3],
-            'created_at': order[4],
-            'updated_at': order[5]
-        })
+        ws.append([order['product'], order['total_quantity']])
     
-    return jsonify(orders_list)
+    # Save to BytesIO object
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+    
+    return send_file(
+        excel_file,
+        as_attachment=True,
+        download_name='pedidos.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+
+@app.route("/send_message", methods=["POST"])
+def send_message():
+    data = request.json
+    message = data.get("message", "").strip()
+    session_id = data.get("session_id", "default")
+    
+    if not message:
+        return jsonify({'error': 'Mensagem vazia'})
+    
+    session = get_user_session(session_id)
+    result = session.process_message(message)
+    
+    response = {
+        'status': session.state,
+        'current_orders': session.get_current_orders(),
+        'confirmed_orders': session.confirmed_orders,
+        'pending_orders': session.pending_orders
+    }
+    
+    if result.get('message'):
+        response['bot_message'] = result['message']
+    
+    return jsonify(response)
+
+@app.route("/get_updates", methods=["POST"])
+def get_updates():
+    """Get updates including pending messages and session state"""
+    data = request.json
+    session_id = data.get("session_id", "default")
+    
+    session = get_user_session(session_id)
+    pending_message = session.get_pending_message()
+    
+    response = {
+        'state': session.state,
+        'current_orders': session.get_current_orders(),
+        'confirmed_orders': session.confirmed_orders,
+        'pending_orders': session.pending_orders,
+        'reminders_sent': session.reminder_count,
+        'has_message': pending_message is not None
+    }
+    
+    if pending_message:
+        response['bot_message'] = pending_message
+    
+    return jsonify(response)
+
+@app.route("/get_orders", methods=["GET"])
+def get_orders():
+    session_id = request.args.get("session_id", "default")
+    session = get_user_session(session_id)
+    return jsonify({
+        'current_orders': session.get_current_orders(),
+        'confirmed_orders': session.confirmed_orders,
+        'pending_orders': session.pending_orders
+    })
+
+@app.route("/reset_session", methods=["POST"])
+def reset_session():
+    """Reset session manually"""
+    data = request.json
+    session_id = data.get("session_id", "default")
+    
+    session = get_user_session(session_id)
+    session.start_new_conversation()
+    
+    return jsonify({'success': True})
 
 if __name__ == "__main__":
-    init_db()
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)
