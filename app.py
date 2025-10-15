@@ -928,18 +928,16 @@ def send_message():
     session = get_user_session(session_id)
     result = session.process_message(message)
 
-    public_orders = session.get_all_public_orders()
-    response = {
-        'status': session.state,
-        'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],
-        'pending_orders': public_orders["pending"]  
-    }
-    
     if result.get('message'):
         response['bot_message'] = result['message']
     
-    return jsonify(response)
+    public_orders = session.get_all_public_orders()
+    return jsonify({
+        'status': session.state,
+        'current_orders': session.get_current_orders(),
+        'confirmed_orders': public_orders["confirmed"],  # From database
+        'pending_orders': public_orders["pending"]       # From database
+    })
 
 @app.route("/get_updates", methods=["POST"])
 def get_updates():
@@ -952,12 +950,11 @@ def get_updates():
     
     # Get ALL public orders from database
     public_orders = session.get_all_public_orders()
-    
     response = {
         'state': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],
-        'pending_orders': public_orders["pending"],
+        'confirmed_orders': public_orders["confirmed"],  # From database
+        'pending_orders': public_orders["pending"],      # From database
         'reminders_sent': session.reminder_count,
         'has_message': pending_message is not None
     }
