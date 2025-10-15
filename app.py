@@ -1,3 +1,7 @@
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from flask import Flask, render_template, request, jsonify, send_file
 import re
 import unicodedata
 from copy import deepcopy
@@ -5,25 +9,65 @@ import threading
 import uuid
 import queue
 import time
-from flask import Flask, render_template, request, jsonify, send_file
-from openpyxl import Workbook, load_workbook
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-# --------- Excel / persistence setup ----------
-EXCEL_PATH = "Pedidos.xlsx"
-excel_lock = threading.Lock()
+# --------- Database setup ----------
+def get_db_connection():
+    # Render provides DATABASE_URL environment variable
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        # Fallback for local development
+        database_url = "postgresql://username:password@localhost:5432/order_bot"
+    
+    conn = psycopg2.connect(database_url)
+    return conn
 
-# Load or initialize Excel
-try:
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb.active
-except:
-    wb = Workbook()
-    ws = wb.active
-    ws.append(["Produto", "Quantidade"])  # header
-    wb.save(EXCEL_PATH)
+def init_db():
+    """Initialize database tables"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Create orders table
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(255) NOT NULL,
+            product VARCHAR(255) NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create products table (for your product catalog)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(255) UNIQUE NOT NULL
+        )
+    ''')
+    
+    # Insert default products if they don't exist
+    default_products = [
+        "limão", "abacaxi", "abacaxi com hortelã", "açaí", "acerola",
+        "ameixa", "cajá", "cajú", "goiaba", "graviola",
+        "manga", "maracujá", "morango", "seriguela", "tamarindo",
+        "caixa de ovos", "ovo", "queijo"
+    ]
+    
+    for product in default_products:
+        cur.execute(
+            'INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO NOTHING',
+            (product,)
+        )
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# Initialize database on startup
+init_db()
 
 # ---------- Core Order Processing Functions ----------
 
@@ -377,11 +421,11 @@ class OrderSession:
     def __init__(self, session_id):
         self.session_id = session_id
         self.products_db = deepcopy(products_db)
-        self.current_db = deepcopy(products_db)  # Temporary orders
-        self.confirmed_orders = []  # List of confirmed orders
-        self.pending_orders = []    # Orders waiting for confirmation
+        self.current_db = deepcopy(products_db)
+        self.confirmed_orders = []
+        self.pending_orders = []
         
-        self.state = "collecting"  # option, collecting, confirming, pending_confirmation, waiting_for_next
+        self.state = "collecting"
         self.reminder_count = 0
         self.message_queue = queue.Queue()
         self.active_timer = None
@@ -672,26 +716,40 @@ class OrderSession:
         self._cancel_timer()
     
     def _save_final_orders(self, orders_list):
-        """Save final confirmed orders to Excel"""
-        with excel_lock:
-            for order in orders_list:
-                for product, qty in order.items():
-                    if qty > 0:
-                        # Find or create row for this product
-                        product_found = False
-                        for row in range(2, ws.max_row + 1):
-                            if ws[f'A{row}'].value == product:
-                                # Update existing quantity
-                                existing_qty = ws[f'B{row}'].value or 0
-                                ws[f'B{row}'] = existing_qty + qty
-                                product_found = True
-                                break
-                        
-                        if not product_found:
-                            # Add new row
-                            ws.append([product, qty])
-            
-            wb.save(EXCEL_PATH)
+        """Save final confirmed orders to database"""
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        for order in orders_list:
+            for product, qty in order.items():
+                if qty > 0:
+                    cur.execute(
+                        'INSERT INTO orders (session_id, product, quantity) VALUES (%s, %s, %s)',
+                        (self.session_id, product, qty)
+                    )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+    def get_all_orders_summary(self):
+        """Get summary of all orders from database (for Excel download)"""
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute('''
+            SELECT product, SUM(quantity) as total_quantity 
+            FROM orders 
+            GROUP BY product 
+            ORDER BY product
+        ''')
+        
+        orders = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return orders
+
     
     def get_pending_message(self):
         """Get pending message if any"""
@@ -716,6 +774,38 @@ def get_user_session(session_id):
 def index():
     session_id = request.args.get('session_id', str(uuid.uuid4()))
     return render_template("index.html", session_id=session_id)
+
+@app.route("/download_excel", methods=["GET"])
+def download_excel():
+    """Generate Excel file from database"""
+    from openpyxl import Workbook
+    from io import BytesIO
+    
+    session_id = request.args.get("session_id", "default")
+    session = get_user_session(session_id)
+    
+    # Get all orders from database
+    orders = session.get_all_orders_summary()
+    
+    # Create Excel file in memory
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Produto", "Quantidade"])
+    
+    for order in orders:
+        ws.append([order['product'], order['total_quantity']])
+    
+    # Save to BytesIO object
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+    
+    return send_file(
+        excel_file,
+        as_attachment=True,
+        download_name='pedidos.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
 @app.route("/send_message", methods=["POST"])
 def send_message():
@@ -784,10 +874,6 @@ def reset_session():
     session.start_new_conversation()
     
     return jsonify({'success': True})
-
-@app.route("/download_excel", methods=["GET"])
-def download_excel():
-    return send_file(EXCEL_PATH, as_attachment=True, download_name='pedidos.xlsx')
 
 if __name__ == "__main__":
     app.run(debug=True, host='127.0.0.1', port=5000, use_reloader=False)
