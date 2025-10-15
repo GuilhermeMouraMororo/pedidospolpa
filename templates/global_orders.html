@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pedidos Globais - {{ business_name }}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .order-item { padding: 10px; border-bottom: 1px solid #eee; }
+        .product { font-weight: bold; }
+        .quantity { color: #4f46e5; }
+    </style>
+</head>
+<body>
+    <h1>📊 Pedidos Confirmados - Todos os Clientes</h1>
+    <div id="ordersList">
+        {% if orders %}
+            {% for order in orders %}
+                <div class="order-item">
+                    <span class="product">{{ order.product }}</span>: 
+                    <span class="quantity">{{ order.total_quantity }} unidades</span>
+                </div>
+            {% endfor %}
+        {% else %}
+            <p>Nenhum pedido confirmado ainda.</p>
+        {% endif %}
+    </div>
+</body>
+</html>
