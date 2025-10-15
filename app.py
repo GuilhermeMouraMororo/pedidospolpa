@@ -77,8 +77,39 @@ def init_db():
     conn.close()
     print("Database initialized successfully")
 
+def update_db_schema():
+    """Update existing database to add order_type column"""
+    conn = get_db_connection()
+    if conn is None:
+        print("No database connection available for schema update")
+        return
+        
+    try:
+        cur = conn.cursor()
+        
+        # Check if order_type column exists
+        cur.execute('''
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='orders' and column_name='order_type'
+        ''')
+        
+        if not cur.fetchone():
+            print("Adding order_type column to orders table...")
+            cur.execute('ALTER TABLE orders ADD COLUMN order_type VARCHAR(20) DEFAULT \'confirmed\'')
+            conn.commit()
+            print("Database schema updated successfully")
+        else:
+            print("order_type column already exists")
+            
+        cur.close()
+        conn.close()
+    except Exception as e:
+        print(f"Error updating database schema: {e}")
+
 # Initialize database on startup
 init_db()
+update_db_schema()
 
 # ---------- Core Order Processing Functions ----------
 
@@ -432,7 +463,10 @@ class OrderSession:
     def __init__(self, session_id):
         self.session_id = session_id
         self.products_db = deepcopy(products_db)
-        self.current_db = deepcopy(products_db)  # Temporary orders for current session
+        self.current_db = deepcopy(products_db)
+        
+        # Remove the old confirmed_orders and pending_orders attributes
+        # We'll use the database for all public orders
         
         self.state = "collecting"
         self.reminder_count = 0
@@ -440,6 +474,78 @@ class OrderSession:
         self.active_timer = None
         self.last_activity = time.time()
         self.waiting_for_option = False
+
+    def get_all_public_orders(self):
+        """Get ALL orders from database (public view)"""
+        try:
+            conn = get_db_connection()
+            if conn is None:
+                return {"confirmed": {}, "pending": {}}
+                
+            cur = conn.cursor()
+            
+            # Get confirmed orders
+            cur.execute('''
+                SELECT product, SUM(quantity) as total_quantity 
+                FROM orders 
+                WHERE order_type = 'confirmed'
+                GROUP BY product 
+                ORDER BY product
+            ''')
+            confirmed_orders = {}
+            for product, total in cur.fetchall():
+                if total > 0:
+                    confirmed_orders[product] = total
+            
+            # Get pending orders  
+            cur.execute('''
+                SELECT product, SUM(quantity) as total_quantity 
+                FROM orders 
+                WHERE order_type = 'pending'
+                GROUP BY product 
+                ORDER BY product
+            ''')
+            pending_orders = {}
+            for product, total in cur.fetchall():
+                if total > 0:
+                    pending_orders[product] = total
+            
+            cur.close()
+            conn.close()
+            
+            return {
+                "confirmed": confirmed_orders,
+                "pending": pending_orders
+            }
+            
+        except Exception as e:
+            print(f"Error loading public orders: {e}")
+            return {"confirmed": {}, "pending": {}}
+
+    def save_public_orders(self, orders_list, order_type="confirmed"):
+        """Save orders to public database"""
+        conn = get_db_connection()
+        if conn is None:
+            print("No database connection available")
+            return False
+            
+        try:
+            cur = conn.cursor()
+            for order in orders_list:
+                for product, qty in order.items():
+                    if qty > 0:
+                        cur.execute(
+                            'INSERT INTO orders (session_id, product, quantity, order_type) VALUES (%s, %s, %s, %s)',
+                            (self.session_id, product, qty, order_type)
+                        )
+            conn.commit()
+            cur.close()
+            conn.close()
+            print(f"Saved {len(orders_list)} orders as {order_type}")
+            return True
+        except Exception as e:
+            print(f"Error saving to database: {e}")
+            return False
     
     # === SIMPLE ORDER MANAGEMENT ===
     def add_item(self, parsed_orders):
@@ -870,8 +976,8 @@ def get_orders():
     
     return jsonify({
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],
-        'pending_orders': public_orders["pending"]
+        'confirmed_orders': public_orders["confirmed"],  # From database, not session memory
+        'pending_orders': public_orders["pending"]       # From database, not session memory
     })
 
 @app.route("/reset_session", methods=["POST"])
