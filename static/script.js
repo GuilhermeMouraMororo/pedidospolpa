@@ -1,38 +1,20 @@
 let sessionId = 'default';
 
-function updateOrdersDisplay(data) {
-    const confirmedOrders = document.getElementById('confirmedOrders');
-    const pendingOrders = document.getElementById('pendingOrders');
-    const confirmedCount = document.getElementById('confirmedCount');
-    const pendingCount = document.getElementById('pendingCount');
+function updateOrdersDisplay(orders) {
+    const ordersList = document.getElementById('ordersList');
+    const orderItems = Object.entries(orders);
     
-    // Update confirmed orders - handle object format
-    if (data.confirmed_orders && Object.keys(data.confirmed_orders).length > 0) {
-        confirmedCount.textContent = Object.keys(data.confirmed_orders).length;
-        confirmedOrders.innerHTML = Object.entries(data.confirmed_orders).map(([product, quantity]) => 
-            `<div class="order-item confirmed-item">
-                <span class="product-name">${product}</span>
-                <span class="product-quantity confirmed-quantity">${quantity}</span>
-            </div>`
-        ).join('');
-    } else {
-        confirmedCount.textContent = '0';
-        confirmedOrders.innerHTML = '<div class="empty-orders">Nenhum pedido confirmado</div>';
+    if (orderItems.length === 0) {
+        ordersList.innerHTML = '<div class="empty-orders">Nenhum pedido ainda</div>';
+        return;
     }
     
-    // Update pending orders - handle object format
-    if (data.pending_orders && Object.keys(data.pending_orders).length > 0) {
-        pendingCount.textContent = Object.keys(data.pending_orders).length;
-        pendingOrders.innerHTML = Object.entries(data.pending_orders).map(([product, quantity]) => 
-            `<div class="order-item pending-item">
-                <span class="product-name">${product}</span>
-                <span class="product-quantity pending-quantity">${quantity}</span>
-            </div>`
-        ).join('');
-    } else {
-        pendingCount.textContent = '0';
-        pendingOrders.innerHTML = '<div class="empty-orders">Nenhum pedido pendente</div>';
-    }
+    ordersList.innerHTML = orderItems.map(([product, quantity]) => `
+        <div class="order-item">
+            <span class="product-name">${product}</span>
+            <span class="product-quantity">${quantity}</span>
+        </div>
+    `).join('');
 }
 
 function sendMessage() {
@@ -62,10 +44,8 @@ function sendMessage() {
     .then(response => response.json())
     .then(data => {
         hideTypingIndicator();
-        if (data.bot_message) {
-            addMessage(data.bot_message, 'bot');
-        }
-        updateOrdersDisplay(data);
+        addMessage(data.response, 'bot');
+        updateOrdersDisplay(data.orders);
     })
     .catch(error => {
         hideTypingIndicator();
@@ -104,13 +84,8 @@ document.getElementById('messageInput').addEventListener('keypress', function(e)
 });
 
 // Load initial orders when page loads
-// Load initial orders when page loads
 document.addEventListener('DOMContentLoaded', function() {
-    fetch('/get_updates', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({session_id: sessionId})
-    })
-    .then(response => response.json())
-    .then(data => updateOrdersDisplay(data));
+    fetch(`/get_updates?session_id=${sessionId}`)
+        .then(response => response.json())
+        .then(orders => updateOrdersDisplay(orders));
 });
