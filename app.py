@@ -15,14 +15,19 @@ app.config['SECRET_KEY'] = 'your-secret-key-here'
 
 # --------- Database setup ----------
 def get_db_connection():
-    # Render provides DATABASE_URL environment variable
-    database_url = os.environ.get('DATABASE_URL')
-    if not database_url:
-        # Fallback for local development
-        database_url = "postgresql://username:password@localhost:5432/order_bot"
-    
-    conn = psycopg2.connect(database_url)
-    return conn
+    """Get database connection with better error handling"""
+    try:
+        database_url = os.environ.get('DATABASE_URL')
+        if database_url:
+            conn = psycopg2.connect(database_url)
+            return conn
+        else:
+            # Fall back to Excel if no database is available
+            print("No DATABASE_URL environment variable found")
+            return None
+    except Exception as e:
+        print(f"Database connection failed: {e}")
+        return None
 
 def init_db():
     """Initialize database tables"""
@@ -422,9 +427,10 @@ class OrderSession:
         self.session_id = session_id
         self.products_db = deepcopy(products_db)
         self.current_db = deepcopy(products_db)
-        self.confirmed_orders = []
+        self.confirmed_orders = []  # This will be loaded from DB
         self.pending_orders = []
-
+        
+        # ACTUALLY CALL THE DATABASE LOADER
         self._load_orders_from_db()
         
         self.state = "collecting"
@@ -438,6 +444,10 @@ class OrderSession:
         """Load confirmed orders from database for this session"""
         try:
             conn = get_db_connection()
+            if conn is None:
+                print("No database connection available")
+                return
+                
             cur = conn.cursor()
             cur.execute(
                 'SELECT product, quantity FROM orders WHERE session_id = %s',
@@ -445,15 +455,18 @@ class OrderSession:
             )
             orders = cur.fetchall()
             
+            # Clear existing confirmed orders and reload from DB
+            self.confirmed_orders = []
             for product, quantity in orders:
                 if quantity > 0:
                     self.confirmed_orders.append({product: quantity})
             
             cur.close()
             conn.close()
-            
+            print(f"Loaded {len(self.confirmed_orders)} orders from DB for session {self.session_id}")
         except Exception as e:
             print(f"Error loading orders from DB: {e}")
+            # Continue with empty orders if DB fails
     
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
@@ -863,14 +876,22 @@ def get_updates():
     session = get_user_session(session_id)
     pending_message = session.get_pending_message()
     
+    # Force reload confirmed orders from database
+    session._load_orders_from_db()
+    
     response = {
         'state': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': session.confirmed_orders,
+        'confirmed_orders': session.confirmed_orders,  # Now from DB
         'pending_orders': session.pending_orders,
         'reminders_sent': session.reminder_count,
         'has_message': pending_message is not None
     }
+    
+    if pending_message:
+        response['bot_message'] = pending_message
+    
+    return jsonify(response)
     
     if pending_message:
         response['bot_message'] = pending_message
@@ -881,9 +902,13 @@ def get_updates():
 def get_orders():
     session_id = request.args.get("session_id", "default")
     session = get_user_session(session_id)
+    
+    # Force reload from database to ensure we have latest data
+    session._load_orders_from_db()
+    
     return jsonify({
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': session.confirmed_orders,
+        'confirmed_orders': session.confirmed_orders,  # Now loaded from DB
         'pending_orders': session.pending_orders
     })
 
