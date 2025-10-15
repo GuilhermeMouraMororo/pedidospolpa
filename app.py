@@ -9,6 +9,7 @@ import threading
 import uuid
 import queue
 import time
+import json
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
@@ -29,7 +30,7 @@ def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Create orders table
+    # Create orders table (you have this)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
@@ -37,6 +38,20 @@ def init_db():
             product VARCHAR(255) NOT NULL,
             quantity INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create user_sessions table for persistent session storage
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            session_id VARCHAR(255) PRIMARY KEY,
+            products_db TEXT NOT NULL,
+            current_db TEXT NOT NULL,
+            confirmed_orders TEXT NOT NULL,
+            pending_orders TEXT NOT NULL,
+            state VARCHAR(50) NOT NULL,
+            reminder_count INTEGER DEFAULT 0,
+            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -65,6 +80,87 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
+
+
+
+def serialize_session(session):
+    """Convert session object to JSON-serializable format"""
+    return {
+        'session_id': session.session_id,
+        'products_db': session.products_db,
+        'current_db': session.current_db,
+        'confirmed_orders': session.confirmed_orders,
+        'pending_orders': session.pending_orders,
+        'state': session.state,
+        'reminder_count': session.reminder_count
+    }
+
+def deserialize_session(data):
+    """Convert stored data back to OrderSession object"""
+    session = OrderSession(data['session_id'])
+    session.products_db = data['products_db']
+    session.current_db = data['current_db']
+    session.confirmed_orders = data['confirmed_orders']
+    session.pending_orders = data['pending_orders']
+    session.state = data['state']
+    session.reminder_count = data['reminder_count']
+    return session
+
+def save_session_to_db(session):
+    """Save session to PostgreSQL"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    session_data = serialize_session(session)
+    
+    cur.execute('''
+        INSERT INTO user_sessions (session_id, products_db, current_db, confirmed_orders, pending_orders, state, reminder_count)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (session_id) DO UPDATE SET
+            products_db = EXCLUDED.products_db,
+            current_db = EXCLUDED.current_db,
+            confirmed_orders = EXCLUDED.confirmed_orders,
+            pending_orders = EXCLUDED.pending_orders,
+            state = EXCLUDED.state,
+            reminder_count = EXCLUDED.reminder_count,
+            last_activity = CURRENT_TIMESTAMP
+    ''', (
+        session_data['session_id'],
+        json.dumps(session_data['products_db']),
+        json.dumps(session_data['current_db']),
+        json.dumps(session_data['confirmed_orders']),
+        json.dumps(session_data['pending_orders']),
+        session_data['state'],
+        session_data['reminder_count']
+    ))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def load_session_from_db(session_id):
+    """Load session from PostgreSQL"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute('SELECT * FROM user_sessions WHERE session_id = %s', (session_id,))
+    row = cur.fetchone()
+    
+    cur.close()
+    conn.close()
+    
+    if row:
+        session_data = {
+            'session_id': row[0],
+            'products_db': json.loads(row[1]),
+            'current_db': json.loads(row[2]),
+            'confirmed_orders': json.loads(row[3]),
+            'pending_orders': json.loads(row[4]),
+            'state': row[5],
+            'reminder_count': row[6]
+        }
+        return deserialize_session(session_data)
+    return None
 
 # Initialize database on startup
 init_db()
@@ -774,6 +870,45 @@ def get_user_session(session_id):
 def index():
     session_id = request.args.get('session_id', str(uuid.uuid4()))
     return render_template("index.html", session_id=session_id)
+
+@app.route("/global_orders")
+def global_orders():
+    """Show all confirmed orders to everyone"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    # Get all confirmed orders grouped by product
+    cur.execute('''
+        SELECT product, SUM(quantity) as total_quantity 
+        FROM orders 
+        GROUP BY product 
+        ORDER BY total_quantity DESC
+    ''')
+    
+    all_orders = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    return render_template("global_orders.html", orders=all_orders)
+
+@app.route("/api/global_orders")
+def api_global_orders():
+    """JSON API for global orders"""
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    cur.execute('''
+        SELECT product, SUM(quantity) as total_quantity 
+        FROM orders 
+        GROUP BY product 
+        ORDER BY total_quantity DESC
+    ''')
+    
+    all_orders = cur.fetchall()
+    cur.close()
+    conn.close()
+    
+    return jsonify([dict(order) for order in all_orders])
 
 @app.route("/download_excel", methods=["GET"])
 def download_excel():
