@@ -424,6 +424,8 @@ class OrderSession:
         self.current_db = deepcopy(products_db)
         self.confirmed_orders = []
         self.pending_orders = []
+
+        self._load_orders_from_db()
         
         self.state = "collecting"
         self.reminder_count = 0
@@ -431,6 +433,27 @@ class OrderSession:
         self.active_timer = None
         self.last_activity = time.time()
         self.waiting_for_option = False
+
+    def _load_orders_from_db(self):
+        """Load confirmed orders from database for this session"""
+        try:
+            conn = get_db_connection()
+            cur = conn.cursor()
+            cur.execute(
+                'SELECT product, quantity FROM orders WHERE session_id = %s',
+                (self.session_id,)
+            )
+            orders = cur.fetchall()
+            
+            for product, quantity in orders:
+                if quantity > 0:
+                    self.confirmed_orders.append({product: quantity})
+            
+            cur.close()
+            conn.close()
+            
+        except Exception as e:
+            print(f"Error loading orders from DB: {e}")
     
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
