@@ -32,15 +32,20 @@ def get_db_connection():
 def init_db():
     """Initialize database tables"""
     conn = get_db_connection()
+    if conn is None:
+        print("No database connection, using in-memory storage only")
+        return
+        
     cur = conn.cursor()
     
-    # Create orders table
+    # Create orders table with order_type
     cur.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             session_id VARCHAR(255) NOT NULL,
             product VARCHAR(255) NOT NULL,
             quantity INTEGER NOT NULL,
+            order_type VARCHAR(20) DEFAULT 'confirmed',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -70,6 +75,7 @@ def init_db():
     conn.commit()
     cur.close()
     conn.close()
+    print("Database initialized successfully")
 
 # Initialize database on startup
 init_db()
@@ -813,35 +819,73 @@ def index():
 
 @app.route("/download_excel", methods=["GET"])
 def download_excel():
-    """Generate Excel file from database"""
+    """Generate Excel file from ALL database orders"""
     from openpyxl import Workbook
     from io import BytesIO
     
-    session_id = request.args.get("session_id", "default")
-    session = get_user_session(session_id)
-    
-    # Get all orders from database
-    orders = session.get_all_orders_summary()
-    
-    # Create Excel file in memory
-    wb = Workbook()
-    ws = wb.active
-    ws.append(["Produto", "Quantidade"])
-    
-    for order in orders:
-        ws.append([order['product'], order['total_quantity']])
-    
-    # Save to BytesIO object
-    excel_file = BytesIO()
-    wb.save(excel_file)
-    excel_file.seek(0)
-    
-    return send_file(
-        excel_file,
-        as_attachment=True,
-        download_name='pedidos.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return "Database not available", 500
+            
+        cur = conn.cursor()
+        
+        # Get all confirmed orders
+        cur.execute('''
+            SELECT product, SUM(quantity) as total_quantity 
+            FROM orders 
+            WHERE order_type = 'confirmed'
+            GROUP BY product 
+            ORDER BY product
+        ''')
+        confirmed_orders = cur.fetchall()
+        
+        # Get all pending orders
+        cur.execute('''
+            SELECT product, SUM(quantity) as total_quantity 
+            FROM orders 
+            WHERE order_type = 'pending'
+            GROUP BY product 
+            ORDER BY product
+        ''')
+        pending_orders = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        # Create Excel file
+        wb = Workbook()
+        
+        # Confirmed orders sheet
+        ws_confirmed = wb.active
+        ws_confirmed.title = "Pedidos Confirmados"
+        ws_confirmed.append(["Produto", "Quantidade"])
+        for product, quantity in confirmed_orders:
+            if quantity > 0:
+                ws_confirmed.append([product, quantity])
+        
+        # Pending orders sheet
+        ws_pending = wb.create_sheet("Pedidos Pendentes")
+        ws_pending.append(["Produto", "Quantidade"])
+        for product, quantity in pending_orders:
+            if quantity > 0:
+                ws_pending.append([product, quantity])
+        
+        # Save to BytesIO
+        excel_file = BytesIO()
+        wb.save(excel_file)
+        excel_file.seek(0)
+        
+        return send_file(
+            excel_file,
+            as_attachment=True,
+            download_name='pedidos_completos.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        
+    except Exception as e:
+        print(f"Error generating Excel: {e}")
+        return "Error generating Excel file", 500
 
 @app.route("/send_message", methods=["POST"])
 def send_message():
@@ -876,14 +920,14 @@ def get_updates():
     session = get_user_session(session_id)
     pending_message = session.get_pending_message()
     
-    # Force reload confirmed orders from database
-    session._load_orders_from_db()
+    # Get ALL public orders from database
+    public_orders = session.get_all_public_orders()
     
     response = {
         'state': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': session.confirmed_orders,  # Now from DB
-        'pending_orders': session.pending_orders,
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"],
         'reminders_sent': session.reminder_count,
         'has_message': pending_message is not None
     }
@@ -893,23 +937,18 @@ def get_updates():
     
     return jsonify(response)
     
-    if pending_message:
-        response['bot_message'] = pending_message
-    
-    return jsonify(response)
-
 @app.route("/get_orders", methods=["GET"])
 def get_orders():
     session_id = request.args.get("session_id", "default")
     session = get_user_session(session_id)
     
-    # Force reload from database to ensure we have latest data
-    session._load_orders_from_db()
+    # Get ALL public orders from database
+    public_orders = session.get_all_public_orders()
     
     return jsonify({
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': session.confirmed_orders,  # Now loaded from DB
-        'pending_orders': session.pending_orders
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"]
     })
 
 @app.route("/reset_session", methods=["POST"])
