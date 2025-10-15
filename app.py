@@ -641,7 +641,7 @@ class OrderSession:
                 response = "✅ **PEDIDO CONFIRMADO COM SUCESSO!**\n\n**Itens confirmados:**\n"
                 for product, qty in confirmed_order.items():
                     if qty > 0:
-                        response += f"• {product}: {qty}\n"
+                        response += f"• {qty}x {product}\n"
                 response += "\nObrigado pelo pedido! 🎉"
                 
                 return {
