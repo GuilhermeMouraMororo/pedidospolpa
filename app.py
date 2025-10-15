@@ -476,7 +476,7 @@ class OrderSession:
         self.waiting_for_option = False
 
     def get_all_public_orders(self):
-        """Get ALL orders from database (public view)"""
+        """Get ALL public orders from database (everyone sees these)"""
         try:
             conn = get_db_connection()
             if conn is None:
@@ -546,7 +546,7 @@ class OrderSession:
         except Exception as e:
             print(f"Error saving to database: {e}")
             return False
-    
+        
     # === SIMPLE ORDER MANAGEMENT ===
     def add_item(self, parsed_orders):
         """Add parsed items to current session"""
@@ -773,9 +773,14 @@ class OrderSession:
                 self._cancel_timer()
                 confirmed_order = self.get_current_orders()
                 # Save to PUBLIC database
-                self.save_public_orders([confirmed_order], "confirmed")
+                # When marking as pending, replace with:
+                pending_order = self.get_current_orders()
+                # Save to PUBLIC database as pending
+                self.save_public_orders([pending_order], "pending")
+                self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
                 self._reset_current()
-                
+                self.state = "pending_confirmation"
+
                 response = "✅ **PEDIDO CONFIRMADO COM SUCESSO!**\n\n**Itens confirmados:**\n"
                 for product, qty in confirmed_order.items():
                     if qty > 0:
@@ -931,12 +936,13 @@ def send_message():
     if result.get('message'):
         response['bot_message'] = result['message']
     
+    # In /send_message route, replace the return statement with:
     public_orders = session.get_all_public_orders()
     return jsonify({
         'status': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],  # From database
-        'pending_orders': public_orders["pending"]       # From database
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"]
     })
 
 @app.route("/get_updates", methods=["POST"])
@@ -950,11 +956,12 @@ def get_updates():
     
     # Get ALL public orders from database
     public_orders = session.get_all_public_orders()
+    
     response = {
         'state': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],  # From database
-        'pending_orders': public_orders["pending"],      # From database
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"],
         'reminders_sent': session.reminder_count,
         'has_message': pending_message is not None
     }
@@ -974,10 +981,10 @@ def get_orders():
     
     return jsonify({
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': public_orders["confirmed"],  # From database, not session memory
-        'pending_orders': public_orders["pending"]       # From database, not session memory
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"]
     })
-
+    
 @app.route("/reset_session", methods=["POST"])
 def reset_session():
     """Reset session manually"""
