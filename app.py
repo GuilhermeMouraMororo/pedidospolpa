@@ -927,12 +927,13 @@ def send_message():
     
     session = get_user_session(session_id)
     result = session.process_message(message)
-    
+
+    public_orders = session.get_all_public_orders()
     response = {
         'status': session.state,
         'current_orders': session.get_current_orders(),
-        'confirmed_orders': session.confirmed_orders,
-        'pending_orders': session.pending_orders
+        'confirmed_orders': public_orders["confirmed"],
+        'pending_orders': public_orders["pending"]  
     }
     
     if result.get('message'):
