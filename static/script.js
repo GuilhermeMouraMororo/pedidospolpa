@@ -62,8 +62,10 @@ function sendMessage() {
     .then(response => response.json())
     .then(data => {
         hideTypingIndicator();
-        addMessage(data.response, 'bot');
-        updateOrdersDisplay(data.orders);
+        if (data.bot_message) {
+            addMessage(data.bot_message, 'bot');
+        }
+        updateOrdersDisplay(data);
     })
     .catch(error => {
         hideTypingIndicator();
@@ -102,8 +104,13 @@ document.getElementById('messageInput').addEventListener('keypress', function(e)
 });
 
 // Load initial orders when page loads
+// Load initial orders when page loads
 document.addEventListener('DOMContentLoaded', function() {
-    fetch(`/get_updates?session_id=${sessionId}`)
-        .then(response => response.json())
-        .then(orders => updateOrdersDisplay(orders));
+    fetch('/get_updates', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({session_id: sessionId})
+    })
+    .then(response => response.json())
+    .then(data => updateOrdersDisplay(data));
 });
