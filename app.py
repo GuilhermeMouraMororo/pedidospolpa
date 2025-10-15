@@ -30,52 +30,20 @@ def get_db_connection():
         return None
 
 def init_db():
-    """Initialize database tables"""
-    conn = get_db_connection()
-    if conn is None:
-        print("No database connection, using in-memory storage only")
-        return
-        
-    cur = conn.cursor()
-    
-    # Create orders table with order_type
-    cur.execute('''
+    conn = sqlite3.connect('orders.db')
+    c = conn.cursor()
+    c.execute('''
         CREATE TABLE IF NOT EXISTS orders (
-            id SERIAL PRIMARY KEY,
-            session_id VARCHAR(255) NOT NULL,
-            product VARCHAR(255) NOT NULL,
-            quantity INTEGER NOT NULL,
-            order_type VARCHAR(20) DEFAULT 'confirmed',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_name TEXT NOT NULL,
+            order_details TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # Create products table (for your product catalog)
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(255) UNIQUE NOT NULL
-        )
-    ''')
-    
-    # Insert default products if they don't exist
-    default_products = [
-        "limão", "abacaxi", "abacaxi com hortelã", "açaí", "acerola",
-        "ameixa", "cajá", "cajú", "goiaba", "graviola",
-        "manga", "maracujá", "morango", "seriguela", "tamarindo",
-        "caixa de ovos", "ovo", "queijo"
-    ]
-    
-    for product in default_products:
-        cur.execute(
-            'INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO NOTHING',
-            (product,)
-        )
-    
     conn.commit()
-    cur.close()
     conn.close()
-    print("Database initialized successfully")
 
 def update_db_schema():
     """Update existing database to add order_type column"""
@@ -476,14 +444,14 @@ class OrderSession:
         self.waiting_for_option = False
 
     def start_new_conversation(self):
-    """Reset for a new conversation and wait for next message"""
-    self.current_db = deepcopy(self.products_db)
-    self.state = "waiting_for_next"
-    self.reminder_count = 0
-    self.waiting_for_option = False
-    self._cancel_timer()
-    # Put the restart message in queue
-    self.message_queue.put("🔄 **Conversa reiniciada!**")
+        """Reset for a new conversation and wait for next message"""
+        self.current_db = deepcopy(self.products_db)
+        self.state = "waiting_for_next"
+        self.reminder_count = 0
+        self.waiting_for_option = False
+        self._cancel_timer()
+        # Put the restart message in queue
+        self.message_queue.put("🔄 **Conversa reiniciada!**")
 
     # === SIMPLE ORDER MANAGEMENT ===
     def add_item(self, parsed_orders):
@@ -779,10 +747,127 @@ def get_user_session(session_id):
 
 
 # ---------- Flask routes ----------
-@app.route("/")
+@app.route('/')
 def index():
-    session_id = request.args.get('session_id', str(uuid.uuid4()))
-    return render_template("index.html", session_id=session_id)
+    return redirect(url_for('orders'))
+
+@app.route('/orders')
+def orders():
+    # Get all orders
+    conn = sqlite3.connect('orders.db')
+    c = conn.cursor()
+    
+    # Get pending orders
+    c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
+    pending_orders = c.fetchall()
+    
+    # Get completed orders
+    c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
+    completed_orders = c.fetchall()
+    
+    conn.close()
+    
+    return render_template('orders.html', 
+                         pending_orders=pending_orders,
+                         completed_orders=completed_orders)
+    
+@app.route('/')
+def index():
+    return redirect(url_for('orders'))
+
+@app.route('/orders')
+def orders():
+    # Get all orders
+    conn = sqlite3.connect('orders.db')
+    c = conn.cursor()
+    
+    # Get pending orders
+    c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
+    pending_orders = c.fetchall()
+    
+    # Get completed orders
+    c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
+    completed_orders = c.fetchall()
+    
+    conn.close()
+    
+    return render_template('orders.html', 
+                         pending_orders=pending_orders,
+                         completed_orders=completed_orders)
+
+@app.route('/add_order', methods=['POST'])
+def add_order():
+    if request.method == 'POST':
+        customer_name = request.form.get('customer_name', '').strip()
+        order_details = request.form.get('order_details', '').strip()
+        
+        if customer_name and order_details:
+            conn = sqlite3.connect('orders.db')
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO orders (customer_name, order_details) VALUES (?, ?)",
+                (customer_name, order_details)
+            )
+            conn.commit()
+            conn.close()
+        
+        return redirect(url_for('orders'))
+
+@app.route('/update_order_status/<int:order_id>', methods=['POST'])
+def update_order_status(order_id):
+    new_status = request.form.get('status')
+    
+    if new_status in ['pending', 'completed']:
+        conn = sqlite3.connect('orders.db')
+        c = conn.cursor()
+        c.execute(
+            "UPDATE orders SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (new_status, order_id)
+        )
+        conn.commit()
+        conn.close()
+    
+    return redirect(url_for('orders'))
+
+@app.route('/delete_order/<int:order_id>', methods=['POST'])
+def delete_order(order_id):
+    conn = sqlite3.connect('orders.db')
+    c = conn.cursor()
+    c.execute("DELETE FROM orders WHERE id = ?", (order_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('orders'))
+
+@app.route('/api/orders')
+def api_orders():
+    status = request.args.get('status', 'all')
+    
+    conn = sqlite3.connect('orders.db')
+    c = conn.cursor()
+    
+    if status == 'pending':
+        c.execute("SELECT * FROM orders WHERE status = 'pending' ORDER BY created_at DESC")
+    elif status == 'completed':
+        c.execute("SELECT * FROM orders WHERE status = 'completed' ORDER BY updated_at DESC")
+    else:
+        c.execute("SELECT * FROM orders ORDER BY created_at DESC")
+    
+    orders = c.fetchall()
+    conn.close()
+    
+    # Convert to list of dictionaries for JSON
+    orders_list = []
+    for order in orders:
+        orders_list.append({
+            'id': order[0],
+            'customer_name': order[1],
+            'order_details': order[2],
+            'status': order[3],
+            'created_at': order[4],
+            'updated_at': order[5]
+        })
+    
+    return jsonify(orders_list)
 
 @app.route("/download_excel", methods=["GET"])
 def download_excel():
