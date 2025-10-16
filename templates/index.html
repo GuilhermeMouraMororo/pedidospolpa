@@ -226,6 +226,11 @@
             font-weight: 600;
         }
         
+        .global-header {
+            color: #1e40af;
+            background: #dbeafe;
+        }
+        
         .confirmed-header {
             color: #065f46;
             background: #d1fae5;
@@ -245,6 +250,11 @@
             background: white;
             border-radius: 6px;
             border-left: 4px solid #4f46e5;
+        }
+        
+        .global-item {
+            border-left: 4px solid #3b82f6;
+            background: #f0f9ff;
         }
         
         .confirmed-item {
@@ -271,6 +281,10 @@
             min-width: 35px;
             text-align: center;
             font-size: 12px;
+        }
+        
+        .global-quantity {
+            background: #3b82f6;
         }
         
         .confirmed-quantity {
@@ -317,6 +331,17 @@
             font-style: italic;
         }
         
+        .refresh-btn {
+            background: #8b5cf6;
+            padding: 6px 12px;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        
+        .refresh-btn:hover {
+            background: #7c3aed;
+        }
+        
         @media (max-width: 768px) {
             .container {
                 grid-template-columns: 1fr;
@@ -332,7 +357,7 @@
     <div class="container">
         <div class="chat-container">
             <div class="chat-header">
-                <h1>🤖 {{ business_name }} - Assistente de Pedidos</h1>
+                <h1>🤖 Sistema de Pedidos - Assistente Inteligente</h1>
                 <div id="statusDisplay">
                     <span class="status-indicator status-collecting"></span>
                     <span id="statusText">Coletando pedidos...</span>
@@ -363,25 +388,47 @@
                     <input type="text" id="messageInput" placeholder="Ex: 2 mangas e 3 queijos..." autocomplete="off">
                     <button onclick="sendMessage()">Enviar</button>
                 </div>
+                <div class="quick-commands">
+                    <button class="quick-btn" onclick="quickCommand('pronto')">Pronto</button>
+                    <button class="quick-btn" onclick="quickCommand('confirmar')">Confirmar</button>
+                    <button class="quick-btn" onclick="quickCommand('nao')">Não</button>
+                    <button class="cancel-btn quick-btn" onclick="quickCommand('cancelar')">Cancelar</button>
+                </div>
             </div>
         </div>
         
         <div class="orders-container">
             <div class="orders-header">
-                <h2>📋 Pedidos Confirmados</h2>
-                <button class="download-btn" onclick="downloadExcel()">📥 Excel</button>
+                <h2>📊 Pedidos Globais</h2>
+                <div>
+                    <button class="refresh-btn" onclick="refreshGlobalOrders()">🔄</button>
+                    <button class="download-btn" onclick="downloadExcel()">📥 Excel</button>
+                </div>
             </div>
             
             <div class="session-info">
+                <div><strong>Sessão:</strong> <span id="sessionId">{{ session_id }}</span></div>
                 <div><strong>Status:</strong> <span id="sessionStatus">Coletando</span></div>
                 <div><strong>Itens Atuais:</strong> <span id="itemCount">0</span></div>
                 <div><strong>Lembretes:</strong> <span id="remindersStatus">0/5</span></div>
             </div>
             
             <div class="orders-list" id="ordersList">
+                <!-- Global Orders Section -->
+                <div class="order-section">
+                    <div class="section-header global-header">
+                        <span>🌍 Todos os Pedidos Confirmados</span>
+                        <span id="globalCount">0</span>
+                    </div>
+                    <div id="globalOrders">
+                        <div class="empty-orders">Nenhum pedido global ainda</div>
+                    </div>
+                </div>
+                
+                <!-- Current User's Orders Sections -->
                 <div class="order-section">
                     <div class="section-header confirmed-header">
-                        <span>✅ Pedidos Confirmados</span>
+                        <span>✅ Seus Pedidos Confirmados</span>
                         <span id="confirmedCount">0</span>
                     </div>
                     <div id="confirmedOrders">
@@ -391,7 +438,7 @@
                 
                 <div class="order-section">
                     <div class="section-header pending-header">
-                        <span>🟡 Pedidos Pendentes</span>
+                        <span>🟡 Seus Pedidos Pendentes</span>
                         <span id="pendingCount">0</span>
                     </div>
                     <div id="pendingOrders">
@@ -399,17 +446,66 @@
                     </div>
                 </div>
             </div>
+            
+            <button class="reset-btn" onclick="resetSession()">🔄 Reiniciar Sessão</button>
         </div>
     </div>
 
     <script>
         const sessionId = '{{ session_id }}';
         let updateInterval = null;
+        let globalOrdersInterval = null;
         let currentState = 'collecting';
 
         function startPolling() {
             if (updateInterval) clearInterval(updateInterval);
             updateInterval = setInterval(checkUpdates, 2000);
+        }
+
+        function startGlobalOrdersPolling() {
+            if (globalOrdersInterval) clearInterval(globalOrdersInterval);
+            globalOrdersInterval = setInterval(loadGlobalOrders, 5000); // Refresh global orders every 5 seconds
+            loadGlobalOrders(); // Load immediately
+        }
+
+        async function loadGlobalOrders() {
+            try {
+                const response = await fetch('/global_orders');
+                const globalOrders = await response.json();
+                updateGlobalOrdersDisplay(globalOrders);
+            } catch (error) {
+                console.log('Error loading global orders:', error);
+            }
+        }
+
+        function updateGlobalOrdersDisplay(globalOrders) {
+            const globalOrdersContainer = document.getElementById('globalOrders');
+            const globalCount = document.getElementById('globalCount');
+            
+            if (Object.keys(globalOrders).length === 0) {
+                globalCount.textContent = '0';
+                globalOrdersContainer.innerHTML = '<div class="empty-orders">Nenhum pedido global ainda</div>';
+                return;
+            }
+            
+            globalCount.textContent = Object.keys(globalOrders).length;
+            globalOrdersContainer.innerHTML = Object.entries(globalOrders).map(([product, quantity]) => 
+                `<div class="order-item global-item">
+                    <span class="product-name">${product}</span>
+                    <span class="product-quantity global-quantity">${quantity}</span>
+                </div>`
+            ).join('');
+        }
+
+        function refreshGlobalOrders() {
+            loadGlobalOrders();
+            // Show visual feedback
+            const btn = event.target;
+            const originalText = btn.textContent;
+            btn.textContent = '⏳';
+            setTimeout(() => {
+                btn.textContent = '🔄';
+            }, 1000);
         }
 
         async function checkUpdates() {
@@ -604,6 +700,11 @@
                 // Update orders display
                 updateOrdersDisplay(data);
                 
+                // Refresh global orders when a new order is confirmed
+                if (data.status === 'confirmed') {
+                    loadGlobalOrders();
+                }
+                
             } catch (error) {
                 hideTypingIndicator();
                 addMessage('❌ Erro de conexão. Tente novamente.', 'bot', 'alert');
@@ -617,7 +718,7 @@
         }
 
         async function resetSession() {
-            if (confirm('Reiniciar a sessão? Todos os pedidos serão perdidos.')) {
+            if (confirm('Reiniciar a sessão? Seus pedidos não confirmados serão perdidos, mas os pedidos globais permanecem.')) {
                 try {
                     await fetch('/reset_session', {
                         method: 'POST',
@@ -642,15 +743,14 @@
             }
         });
 
+        // Start all polling
         startPolling();
+        startGlobalOrdersPolling();
         
         // Load initial orders
         fetch(`/get_orders?session_id=${sessionId}`)
             .then(response => response.json())
             .then(orders => updateOrdersDisplay(orders));
     </script>
-</body>
-</html>
-    </div>
 </body>
 </html>
