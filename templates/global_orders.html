@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pedidos Globais - Sistema de Pedidos</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #4f46e5;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+        
+        .orders-list {
+            padding: 30px;
+        }
+        
+        .order-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 20px;
+            margin-bottom: 10px;
+            background: #f8fafc;
+            border-radius: 10px;
+            border-left: 4px solid #4f46e5;
+        }
+        
+        .product-name {
+            font-weight: 600;
+            color: #334155;
+            font-size: 16px;
+        }
+        
+        .product-quantity {
+            background: #4f46e5;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            min-width: 60px;
+            text-align: center;
+            font-size: 14px;
+        }
+        
+        .empty-orders {
+            text-align: center;
+            color: #64748b;
+            font-style: italic;
+            padding: 40px;
+            font-size: 18px;
+        }
+        
+        .download-btn {
+            display: block;
+            width: 200px;
+            margin: 20px auto;
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            text-align: center;
+            text-decoration: none;
+        }
+        
+        .download-btn:hover {
+            background: #059669;
+        }
+        
+        .back-btn {
+            display: inline-block;
+            margin-top: 20px;
+            color: white;
+            text-decoration: none;
+            padding: 10px 20px;
+            border: 2px solid white;
+            border-radius: 25px;
+            transition: all 0.3s;
+        }
+        
+        .back-btn:hover {
+            background: white;
+            color: #4f46e5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Pedidos Confirmados</h1>
+            <p>Todos os pedidos do sistema - Atualizado em tempo real</p>
+            <a href="/" class="back-btn">← Voltar ao Chat</a>
+        </div>
+        
+        <div class="orders-list" id="ordersList">
+            {% if orders %}
+                {% for product, quantity in orders.items() %}
+                    <div class="order-item">
+                        <span class="product-name">{{ product }}</span>
+                        <span class="product-quantity">{{ quantity }}</span>
+                    </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-orders">Nenhum pedido confirmado ainda</div>
+            {% endif %}
+        </div>
+        
+        <a href="/download_excel" class="download-btn">📥 Baixar Excel</a>
+    </div>
+
+    <script>
+        // Auto-refresh every 10 seconds
+        setInterval(() => {
+            fetch('/api/global_orders')
+                .then(response => response.json())
+                .then(orders => {
+                    const ordersList = document.getElementById('ordersList');
+                    
+                    if (Object.keys(orders).length === 0) {
+                        ordersList.innerHTML = '<div class="empty-orders">Nenhum pedido confirmado ainda</div>';
+                        return;
+                    }
+                    
+                    ordersList.innerHTML = Object.entries(orders).map(([product, quantity]) => `
+                        <div class="order-item">
+                            <span class="product-name">${product}</span>
+                            <span class="product-quantity">${quantity}</span>
+                        </div>
+                    `).join('');
+                });
+        }, 10000);
+    </script>
+</body>
+</html>
