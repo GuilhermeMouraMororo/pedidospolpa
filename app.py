@@ -12,7 +12,7 @@ from openpyxl import Workbook
 from io import BytesIO
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 
 # --------- Database setup (SQLite for local development) ----------
 def get_db_connection():
@@ -472,29 +472,17 @@ class OrderSession:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        if os.environ.get('DATABASE_URL'):
-            # PostgreSQL - use the view
-            cur.execute('SELECT * FROM global_orders')
-        else:
-            # SQLite - use a query
-            cur.execute('''
-                SELECT product, SUM(quantity) as total_quantity 
-                FROM confirmed_orders 
-                GROUP BY product 
-                ORDER BY total_quantity DESC
-            ''')
+        cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders GROUP BY product ORDER BY total_quantity DESC')
         
         orders_data = cur.fetchall()
         
-        # Convert to dict format
+        # Always access by index - works for both SQLite and PostgreSQL
         orders = {}
         for row in orders_data:
-            if os.environ.get('DATABASE_URL'):
-                # PostgreSQL - row is already a dict-like object
-                orders[row['product']] = row['total_quantity']
-            else:
-                # SQLite - convert row to dict
-                orders[row[0]] = row[1]
+            product = row[0]      # First column
+            quantity = row[1]     # Second column
+            if product and quantity:
+                orders[product] = quantity
         
         cur.close()
         conn.close()
