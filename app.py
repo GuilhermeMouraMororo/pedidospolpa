@@ -1,4 +1,7 @@
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from flask import Flask, render_template, request, jsonify, send_file
 import re
 import unicodedata
 from copy import deepcopy
@@ -6,27 +9,59 @@ import threading
 import uuid
 import queue
 import time
-from flask import Flask, render_template, request, jsonify, send_file
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
+from io import BytesIO
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-# --------- Excel / persistence setup ----------
-EXCEL_PATH = "Pedidos.xlsx"
-excel_lock = threading.Lock()
+# --------- Database setup ----------
+def get_db_connection():
+    # Render provides DATABASE_URL environment variable
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        # Fallback for local development
+        database_url = "postgresql://username:password@localhost:5432/order_bot"
+    
+    conn = psycopg2.connect(database_url)
+    return conn
 
-# Load or initialize Excel
-try:
-    wb = load_workbook(EXCEL_PATH)
-    ws = wb.active
-except:
-    wb = Workbook()
-    ws = wb.active
-    ws.append(["Produto", "Quantidade"])  # header
-    wb.save(EXCEL_PATH)
+def init_db():
+    """Initialize database tables"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Create orders table for confirmed orders
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS confirmed_orders (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(255) NOT NULL,
+            product VARCHAR(255) NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # Create global orders view (summarized for everyone to see)
+    cur.execute('''
+        CREATE OR REPLACE VIEW global_orders AS
+        SELECT product, SUM(quantity) as total_quantity 
+        FROM confirmed_orders 
+        GROUP BY product 
+        ORDER BY total_quantity DESC
+    ''')
+    
+    conn.commit()
+    cur.close()
+    conn.close()
 
-# ---------- Core Order Processing Functions (unchanged) ----------
+# Initialize database on startup
+init_db()
+
+# ---------- Core Order Processing Functions (UNCHANGED) ----------
+# [Keep all your existing functions: normalize, levenshtein_distance, similarity_percentage, 
+#  parse_number_words, separate_numbers_and_words, extract_numbers_and_positions, 
+#  find_associated_number, parse_order_interactive]
 
 def normalize(text):
     text = text.lower()
@@ -365,7 +400,7 @@ products_db = [
     ["caixa de ovos", 0], ["ovo", 0], ["queijo", 0]
 ]
 
-# ---------- Enhanced OrderBot with Excel Persistence ----------
+# ---------- Enhanced OrderBot with PostgreSQL Persistence ----------
 user_sessions = {}
 session_lock = threading.Lock()
 
@@ -383,62 +418,41 @@ class OrderSession:
         self.active_timer = None
         self.last_activity = time.time()
         self.waiting_for_option = False
-    
-    def _save_to_excel(self):
-        """Save current orders to Excel - shared for all users"""
-        with excel_lock:
-            # Clear existing data (keep header)
-            if ws.max_row > 1:
-                ws.delete_rows(2, ws.max_row)
-            
-            # Add current orders from ALL confirmed orders in the system
-            all_orders = self.get_all_orders_summary()
-            for product, total_qty in all_orders.items():
-                if total_qty > 0:
-                    ws.append([product, total_qty])
-            
-            wb.save(EXCEL_PATH)
 
     def _save_final_orders(self, orders_list):
-        """Save final confirmed orders to Excel"""
-        with excel_lock:
-            # Load current Excel data
-            current_data = {}
-            for row in range(2, ws.max_row + 1):
-                product = ws[f'A{row}'].value
-                quantity = ws[f'B{row}'].value or 0
-                if product:
-                    current_data[product] = quantity
-            
-            # Add new orders
-            for order in orders_list:
-                for product, qty in order.items():
-                    if qty > 0:
-                        if product in current_data:
-                            current_data[product] += qty
-                        else:
-                            current_data[product] = qty
-            
-            # Clear and rewrite Excel
-            if ws.max_row > 1:
-                ws.delete_rows(2, ws.max_row)
-            
-            for product, total_qty in current_data.items():
-                if total_qty > 0:
-                    ws.append([product, total_qty])
-            
-            wb.save(EXCEL_PATH)
+        """Save final confirmed orders to PostgreSQL database"""
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        for order in orders_list:
+            for product, qty in order.items():
+                if qty > 0:
+                    cur.execute(
+                        'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (%s, %s, %s)',
+                        (self.session_id, product, qty)
+                    )
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    def get_global_orders(self):
+        """Get all confirmed orders from database (for sidebar display)"""
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute('SELECT * FROM global_orders')
+        orders = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        # Convert to simple dict format
+        return {order['product']: order['total_quantity'] for order in orders}
 
     def get_all_orders_summary(self):
-        """Get summary of all orders from Excel (shared for everyone)"""
-        with excel_lock:
-            orders = {}
-            for row in range(2, ws.max_row + 1):
-                product = ws[f'A{row}'].value
-                quantity = ws[f'B{row}'].value
-                if product and quantity:
-                    orders[product] = quantity
-            return orders
+        """Get summary of all orders from database (for Excel download)"""
+        return self.get_global_orders()
 
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
@@ -715,26 +729,43 @@ def get_user_session(session_id):
 @app.route("/")
 def index():
     session_id = request.args.get('session_id', str(uuid.uuid4()))
-    return render_template("index.html", session_id=session_id)
+    # Get global orders to display in sidebar
+    session = OrderSession("global")
+    global_orders = session.get_global_orders()
+    return render_template("index.html", session_id=session_id, global_orders=global_orders)
 
 @app.route("/download_excel", methods=["GET"])
 def download_excel():
-    """Download the shared Excel file"""
-    return send_file(EXCEL_PATH, as_attachment=True, download_name='pedidos.xlsx')
-
-@app.route("/global_orders")
-def global_orders():
-    """Show all confirmed orders to everyone"""
+    """Generate Excel file from database"""
     session = OrderSession("global")
-    all_orders = session.get_all_orders_summary()
-    return render_template("global_orders.html", orders=all_orders)
+    orders = session.get_all_orders_summary()
+    
+    # Create Excel file in memory
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Produto", "Quantidade"])
+    
+    for product, quantity in orders.items():
+        ws.append([product, quantity])
+    
+    # Save to BytesIO object
+    excel_file = BytesIO()
+    wb.save(excel_file)
+    excel_file.seek(0)
+    
+    return send_file(
+        excel_file,
+        as_attachment=True,
+        download_name='pedidos.xlsx',
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
 
-@app.route("/api/global_orders")
-def api_global_orders():
-    """JSON API for global orders"""
+@app.route("/global_orders", methods=["GET"])
+def get_global_orders():
+    """API endpoint to get global orders for AJAX updates"""
     session = OrderSession("global")
-    all_orders = session.get_all_orders_summary()
-    return jsonify(all_orders)
+    global_orders = session.get_global_orders()
+    return jsonify(global_orders)
 
 @app.route("/send_message", methods=["POST"])
 def send_message():
