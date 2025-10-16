@@ -122,6 +122,21 @@
             background: white;
         }
         
+        .confirm-btn {
+            background: #10b981 !important;
+            color: white !important;
+            border: none !important;
+            padding: 6px 12px !important;
+            border-radius: 4px !important;
+            font-size: 12px !important;
+            cursor: pointer !important;
+            transition: background 0.3s !important;
+        }
+
+        .confirm-btn:hover {
+            background: #059669 !important;
+        }
+
         .input-group {
             display: flex;
             gap: 10px;
@@ -467,6 +482,33 @@
             globalOrdersInterval = setInterval(loadGlobalOrders, 5000); // Refresh global orders every 5 seconds
             loadGlobalOrders(); // Load immediately
         }
+    
+        async function confirmPendingOrder(orderIndex) {
+            try {
+                const response = await fetch('/confirm_pending_order', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        session_id: sessionId,
+                        order_index: orderIndex
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    addMessage("✅ **PEDIDO PENDENTE CONFIRMADO!** O pedido foi movido para confirmados.", 'bot', 'success');
+                    // Refresh the display
+                    checkUpdates();
+                    loadGlobalOrders();
+                } else {
+                    addMessage("❌ Erro ao confirmar pedido: " + data.message, 'bot', 'alert');
+                }
+            } catch (error) {
+                console.error('Error confirming order:', error);
+                addMessage('❌ Erro de conexão ao confirmar pedido.', 'bot', 'alert');
+            }
+        }
 
         async function loadGlobalOrders() {
             try {
@@ -581,7 +623,10 @@
             const remindersStatus = document.getElementById('remindersStatus');
             
             itemCount.textContent = Object.keys(data.current_orders).length;
-            remindersStatus.textContent = `${data.reminders_sent || 0}/5`;
+            
+            // Show pending orders count in reminders status
+            const pendingCount = data.pending_orders ? data.pending_orders.length : 0;
+            remindersStatus.textContent = `${data.reminders_sent || 0}/5 (${pendingCount} pendente(s))`;
         }
 
         function updateOrdersDisplay(data) {
@@ -590,7 +635,7 @@
             const confirmedCount = document.getElementById('confirmedCount');
             const pendingCount = document.getElementById('pendingCount');
             
-            // Update confirmed orders
+            // Update confirmed orders (keep existing code)
             if (data.confirmed_orders && data.confirmed_orders.length > 0) {
                 confirmedCount.textContent = data.confirmed_orders.length;
                 confirmedOrders.innerHTML = data.confirmed_orders.map((order, index) => 
@@ -609,12 +654,18 @@
                 confirmedOrders.innerHTML = '<div class="empty-orders">Nenhum pedido confirmado</div>';
             }
             
-            // Update pending orders
+            // Update pending orders WITH CONFIRM BUTTONS
             if (data.pending_orders && data.pending_orders.length > 0) {
                 pendingCount.textContent = data.pending_orders.length;
                 pendingOrders.innerHTML = data.pending_orders.map((order, index) => 
                     `<div style="margin-bottom: 15px;">
-                        <div style="font-weight: bold; color: #92400e; margin-bottom: 5px; font-size: 14px;">Pedido Pendente ${index + 1}:</div>
+                        <div style="font-weight: bold; color: #92400e; margin-bottom: 5px; font-size: 14px; display: flex; justify-content: space-between; align-items: center;">
+                            <span>Pedido Pendente ${index + 1}:</span>
+                            <button class="confirm-btn" onclick="confirmPendingOrder(${index})" 
+                                    style="background: #10b981; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; transition: background 0.3s;">
+                                ✅ Confirmar
+                            </button>
+                        </div>
                         ${Object.entries(order).map(([product, quantity]) => 
                             `<div class="order-item pending-item">
                                 <span class="product-name">${product}</span>
@@ -628,7 +679,6 @@
                 pendingOrders.innerHTML = '<div class="empty-orders">Nenhum pedido pendente</div>';
             }
         }
-
         function addMessage(text, sender, messageType = 'normal') {
             if (!text) return;
             
