@@ -1,7 +1,4 @@
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from flask import Flask, render_template, request, jsonify, send_file
 import re
 import unicodedata
 from copy import deepcopy
@@ -9,67 +6,27 @@ import threading
 import uuid
 import queue
 import time
+from flask import Flask, render_template, request, jsonify, send_file
+from openpyxl import Workbook, load_workbook
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-# --------- Database setup ----------
-def get_db_connection():
-    # Render provides DATABASE_URL environment variable
-    database_url = os.environ.get('DATABASE_URL')
-    if not database_url:
-        # Fallback for local development
-        database_url = "postgresql://username:password@localhost:5432/order_bot"
-    
-    conn = psycopg2.connect(database_url)
-    return conn
+# --------- Excel / persistence setup ----------
+EXCEL_PATH = "Pedidos.xlsx"
+excel_lock = threading.Lock()
 
-def init_db():
-    """Initialize database tables"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Create orders table
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            id SERIAL PRIMARY KEY,
-            session_id VARCHAR(255) NOT NULL,
-            product VARCHAR(255) NOT NULL,
-            quantity INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Create products table (for your product catalog)
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(255) UNIQUE NOT NULL
-        )
-    ''')
-    
-    # Insert default products if they don't exist
-    default_products = [
-        "limão", "abacaxi", "abacaxi com hortelã", "açaí", "acerola",
-        "ameixa", "cajá", "cajú", "goiaba", "graviola",
-        "manga", "maracujá", "morango", "seriguela", "tamarindo",
-        "caixa de ovos", "ovo", "queijo"
-    ]
-    
-    for product in default_products:
-        cur.execute(
-            'INSERT INTO products (name) VALUES (%s) ON CONFLICT (name) DO NOTHING',
-            (product,)
-        )
-    
-    conn.commit()
-    cur.close()
-    conn.close()
+# Load or initialize Excel
+try:
+    wb = load_workbook(EXCEL_PATH)
+    ws = wb.active
+except:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Produto", "Quantidade"])  # header
+    wb.save(EXCEL_PATH)
 
-# Initialize database on startup
-init_db()
-
-# ---------- Core Order Processing Functions ----------
+# ---------- Core Order Processing Functions (unchanged) ----------
 
 def normalize(text):
     text = text.lower()
@@ -399,21 +356,16 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
 
     return parsed_orders, working_db
 
-
-
 # ---------- Initialize products_db ----------
 products_db = [
-    ["limão"],
-    ["abacaxi"], ["abacaxi com hortelã"], ["açaí"], ["acerola"],
-    ["ameixa"], ["cajá"], ["cajú"], ["goiaba"], ["graviola"],
-    ["manga"], ["maracujá"], ["morango"], ["seriguela"], ["tamarindo"],
-    ["caixa de ovos"], ["ovo"], ["queijo"]
+    ["limão", 0],
+    ["abacaxi", 0], ["abacaxi com hortelã", 0], ["açaí", 0], ["acerola", 0],
+    ["ameixa", 0], ["cajá", 0], ["cajú", 0], ["goiaba", 0], ["graviola", 0],
+    ["manga", 0], ["maracujá", 0], ["morango", 0], ["seriguela", 0], ["tamarindo", 0],
+    ["caixa de ovos", 0], ["ovo", 0], ["queijo", 0]
 ]
 
-for product in products_db:
-    product.append(0)
-
-# ---------- Enhanced OrderBot with New Requirements ----------
+# ---------- Enhanced OrderBot with Excel Persistence ----------
 user_sessions = {}
 session_lock = threading.Lock()
 
@@ -432,6 +384,62 @@ class OrderSession:
         self.last_activity = time.time()
         self.waiting_for_option = False
     
+    def _save_to_excel(self):
+        """Save current orders to Excel - shared for all users"""
+        with excel_lock:
+            # Clear existing data (keep header)
+            if ws.max_row > 1:
+                ws.delete_rows(2, ws.max_row)
+            
+            # Add current orders from ALL confirmed orders in the system
+            all_orders = self.get_all_orders_summary()
+            for product, total_qty in all_orders.items():
+                if total_qty > 0:
+                    ws.append([product, total_qty])
+            
+            wb.save(EXCEL_PATH)
+
+    def _save_final_orders(self, orders_list):
+        """Save final confirmed orders to Excel"""
+        with excel_lock:
+            # Load current Excel data
+            current_data = {}
+            for row in range(2, ws.max_row + 1):
+                product = ws[f'A{row}'].value
+                quantity = ws[f'B{row}'].value or 0
+                if product:
+                    current_data[product] = quantity
+            
+            # Add new orders
+            for order in orders_list:
+                for product, qty in order.items():
+                    if qty > 0:
+                        if product in current_data:
+                            current_data[product] += qty
+                        else:
+                            current_data[product] = qty
+            
+            # Clear and rewrite Excel
+            if ws.max_row > 1:
+                ws.delete_rows(2, ws.max_row)
+            
+            for product, total_qty in current_data.items():
+                if total_qty > 0:
+                    ws.append([product, total_qty])
+            
+            wb.save(EXCEL_PATH)
+
+    def get_all_orders_summary(self):
+        """Get summary of all orders from Excel (shared for everyone)"""
+        with excel_lock:
+            orders = {}
+            for row in range(2, ws.max_row + 1):
+                product = ws[f'A{row}'].value
+                quantity = ws[f'B{row}'].value
+                if product and quantity:
+                    orders[product] = quantity
+            return orders
+
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
         self.current_db = deepcopy(self.products_db)
@@ -439,12 +447,10 @@ class OrderSession:
         self.reminder_count = 0
         self.waiting_for_option = False
         self._cancel_timer()
-        # Put the restart message in queue
         self.message_queue.put("🔄 **Conversa reiniciada!**")
         
     def add_item(self, parsed_orders):
         """Add parsed items to current database - simplified"""
-        # This method is now mostly for internal use, not for generating responses
         for order in parsed_orders:
             for idx, (product, _) in enumerate(self.current_db):
                 if product == order["product"]:
@@ -469,9 +475,8 @@ class OrderSession:
         self._start_inactivity_timer()
             
     def _start_inactivity_timer(self):
-        """Start 5-second inactivity timer"""
+        """Start 30-second inactivity timer"""
         self._cancel_timer()
-        print(f"DEBUG: Starting inactivity timer for session {self.session_id}")  # Debug line
         self.active_timer = threading.Timer(30.0, self._send_summary)
         self.active_timer.daemon = True
         self.active_timer.start()
@@ -484,8 +489,6 @@ class OrderSession:
     
     def _send_summary(self):
         """Send summary and start confirmation cycle"""
-        print(f"DEBUG: Timer triggered for session {self.session_id}, state: {self.state}, has_items: {self.has_items()}")  # Debug line
-        
         if self.state == "collecting" and self.has_items():
             self.state = "confirming"
             self.reminder_count = 0
@@ -493,18 +496,16 @@ class OrderSession:
             self.message_queue.put(summary)
             self._start_reminder_cycle()
         elif self.state == "collecting":
-            print(f"DEBUG: No items found, restarting timer for session {self.session_id}")  # Debug line
             self._start_inactivity_timer()
         
     def _start_reminder_cycle(self):
-        """Start reminder cycle - first reminder after 5 seconds"""
+        """Start reminder cycle - first reminder after 30 seconds"""
         self.reminder_count = 1
-        self._cancel_timer()  # Cancel any existing timers
+        self._cancel_timer()
         self.active_timer = threading.Timer(30.0, self._send_reminder)
         self.active_timer.daemon = True
         self.active_timer.start()
 
-    
     def _send_reminder(self):
         """Send a reminder"""
         if self.state == "confirming" and self.reminder_count <= 5:
@@ -512,10 +513,8 @@ class OrderSession:
             self.message_queue.put(f"🔔 **LEMBRETE ({self.reminder_count}/5):**\n{summary}")
             
             if self.reminder_count == 5:
-                # After 5th reminder, mark as pending
                 self._mark_as_pending()
             else:
-                # Schedule next reminder after 5 seconds
                 self.reminder_count += 1
                 self._cancel_timer()
                 self.active_timer = threading.Timer(30.0, self._send_reminder)
@@ -555,12 +554,11 @@ class OrderSession:
             self.start_new_conversation()
             return {
                 'success': True,
-                'message': None  # Message already queued
+                'message': None
             }
         
-        # Handle waiting_for_next state (after cancellation, before showing options)
+        # Handle waiting_for_next state
         if self.state == "waiting_for_next":
-            # Now show the option message
             self.state = "option"
             self.waiting_for_option = True
             return {
@@ -568,26 +566,24 @@ class OrderSession:
                 'message': "🔄 **Conversa reiniciada!**\n\nVocê quer pedir(1) ou falar com o gerente(2)?"
             }
         
-        # Handle option state (after showing options)
+        # Handle option state
         if self.state == "option" and self.waiting_for_option:
             if message_lower == "1":
                 self.waiting_for_option = False
                 self.state = "collecting"
-                self._start_inactivity_timer()  # Start timer when entering collecting state
+                self._start_inactivity_timer()
                 return {
                     'success': True,
                     'message': "Ótimo! Digite seus pedidos. Ex: '2 mangas e 3 queijos'"
                 }
             elif message_lower == "2":
-                # Reset to initial state so the cycle repeats
                 self.waiting_for_option = False
-                self.state = "waiting_for_next"  # Go back to waiting_for_next state
+                self.state = "waiting_for_next"
                 return {
                     'success': True,
                     'message': "Ok então."
                 }
             else:
-                # Keep prompting for valid option
                 return {
                     'success': False,
                     'message': "Por favor, escolha uma opção: 1 para pedir ou 2 para falar com o gerente."
@@ -597,35 +593,30 @@ class OrderSession:
         if self.state == "pending_confirmation":
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
                 if self.pending_orders:
-                    # Move pending orders to confirmed
                     self.confirmed_orders.extend(self.pending_orders)
                     self._save_final_orders(self.pending_orders)
                     pending_count = len(self.pending_orders)
                     self.pending_orders = []
                     self.state = "collecting"
-                    self._start_inactivity_timer()  # Start timer when returning to collecting
+                    self._start_inactivity_timer()
                     return {
                         'success': True,
                         'message': f"✅ **PEDIDO PENDENTE CONFIRMADO!** {pending_count} pedido(s) adicionado(s) à lista."
                     }
                 else:
                     self.state = "collecting"
-                    self._start_inactivity_timer()  # Start timer when returning to collecting
+                    self._start_inactivity_timer()
                     return {
                         'success': True,
                         'message': "🔄 Nenhum pedido pendente. Continue adicionando itens."
                     }
             else:
-                # Any other message continues normal collection
                 self.state = "collecting"
-                self._start_inactivity_timer()  # Start timer when entering collecting
-                # Process the message as a normal order
+                self._start_inactivity_timer()
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 self.current_db = updated_db
                 if parsed_orders:
-                    return {
-                        'success': True,
-                    }
+                    return {'success': True}
                 else:
                     return {'success': True, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
         
@@ -651,25 +642,20 @@ class OrderSession:
             elif any(word in message_lower.split() for word in ['nao', 'não', 'n']):
                 self._cancel_timer()
                 self._reset_current()
-                self._start_inactivity_timer()  # Start timer when resetting to empty state
+                self._start_inactivity_timer()
                 return {
                     'success': True, 
                     'message': "🔄 **Lista limpa!** Digite novos itens."
                 }
             else:
-                # Try to parse as product order during confirmation
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 if parsed_orders:
-                    # Update database directly
                     self.current_db = updated_db
                     self._cancel_timer()
                     self.state = "collecting"
                     self.reminder_count = 0
-                    self._start_inactivity_timer()  # Start timer when returning to collecting
-                    
-                    return {
-                        'success': True,
-                    }
+                    self._start_inactivity_timer()
+                    return {'success': True}
                 else:
                     return {
                         'success': False,
@@ -685,19 +671,15 @@ class OrderSession:
                 else:
                     return {'success': False, 'message': "❌ Lista vazia. Adicione itens primeiro."}
             else:
-                # Parse product order
                 parsed_orders, updated_db = parse_order_interactive(message, self.current_db)
                 self.current_db = updated_db
                 if parsed_orders:
-                    self._start_inactivity_timer()  # Restart timer after adding items
-                    return {
-                        'success': True
-                    }
+                    self._start_inactivity_timer()
+                    return {'success': True}
                 else:
-                    self._start_inactivity_timer()  # Restart timer even if no items recognized
+                    self._start_inactivity_timer()
                     return {'success': False, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
         
-        # Default fallback
         return {'success': False, 'message': "Estado não reconhecido. Digite 'cancelar' para reiniciar."}
         
     def has_items(self):
@@ -715,42 +697,6 @@ class OrderSession:
         self.reminder_count = 0
         self._cancel_timer()
     
-    def _save_final_orders(self, orders_list):
-        """Save final confirmed orders to database"""
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        for order in orders_list:
-            for product, qty in order.items():
-                if qty > 0:
-                    cur.execute(
-                        'INSERT INTO orders (session_id, product, quantity) VALUES (%s, %s, %s)',
-                        (self.session_id, product, qty)
-                    )
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-    def get_all_orders_summary(self):
-        """Get summary of all orders from database (for Excel download)"""
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cur.execute('''
-            SELECT product, SUM(quantity) as total_quantity 
-            FROM orders 
-            GROUP BY product 
-            ORDER BY product
-        ''')
-        
-        orders = cur.fetchall()
-        cur.close()
-        conn.close()
-        
-        return orders
-
-    
     def get_pending_message(self):
         """Get pending message if any"""
         try:
@@ -758,16 +704,12 @@ class OrderSession:
         except queue.Empty:
             return None
 
-
-
 def get_user_session(session_id):
     """Get or create user session"""
     with session_lock:
         if session_id not in user_sessions:
             user_sessions[session_id] = OrderSession(session_id)
         return user_sessions[session_id]
-
-
 
 # ---------- Flask routes ----------
 @app.route("/")
@@ -777,35 +719,22 @@ def index():
 
 @app.route("/download_excel", methods=["GET"])
 def download_excel():
-    """Generate Excel file from database"""
-    from openpyxl import Workbook
-    from io import BytesIO
-    
-    session_id = request.args.get("session_id", "default")
-    session = get_user_session(session_id)
-    
-    # Get all orders from database
-    orders = session.get_all_orders_summary()
-    
-    # Create Excel file in memory
-    wb = Workbook()
-    ws = wb.active
-    ws.append(["Produto", "Quantidade"])
-    
-    for order in orders:
-        ws.append([order['product'], order['total_quantity']])
-    
-    # Save to BytesIO object
-    excel_file = BytesIO()
-    wb.save(excel_file)
-    excel_file.seek(0)
-    
-    return send_file(
-        excel_file,
-        as_attachment=True,
-        download_name='pedidos.xlsx',
-        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    )
+    """Download the shared Excel file"""
+    return send_file(EXCEL_PATH, as_attachment=True, download_name='pedidos.xlsx')
+
+@app.route("/global_orders")
+def global_orders():
+    """Show all confirmed orders to everyone"""
+    session = OrderSession("global")
+    all_orders = session.get_all_orders_summary()
+    return render_template("global_orders.html", orders=all_orders)
+
+@app.route("/api/global_orders")
+def api_global_orders():
+    """JSON API for global orders"""
+    session = OrderSession("global")
+    all_orders = session.get_all_orders_summary()
+    return jsonify(all_orders)
 
 @app.route("/send_message", methods=["POST"])
 def send_message():
