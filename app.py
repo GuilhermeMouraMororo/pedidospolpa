@@ -1,5 +1,6 @@
-import sqlite3
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template, request, jsonify, send_file
 import re
 import unicodedata
@@ -12,65 +13,43 @@ from openpyxl import Workbook
 from io import BytesIO
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
+app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-# --------- Database setup (SQLite for local development) ----------
+# --------- Database setup ----------
 def get_db_connection():
-    # Use SQLite for local development, PostgreSQL for production
-    if os.environ.get('DATABASE_URL'):
-        # Production - use PostgreSQL
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        database_url = os.environ.get('DATABASE_URL')
-        conn = psycopg2.connect(database_url)
-        return conn
-    else:
-        # Local development - use SQLite
-        conn = sqlite3.connect('local_orders.db')
-        conn.row_factory = sqlite3.Row
-        return conn
+    # Render provides DATABASE_URL environment variable
+    database_url = os.environ.get('DATABASE_URL')
+    if not database_url:
+        # Fallback for local development
+        database_url = "postgresql://username:password@localhost:5432/order_bot"
+    
+    conn = psycopg2.connect(database_url)
+    return conn
 
 def init_db():
     """Initialize database tables"""
     conn = get_db_connection()
     cur = conn.cursor()
     
-    # Check if we're using PostgreSQL or SQLite
-    is_postgres = os.environ.get('DATABASE_URL') is not None
+    # Create orders table for confirmed orders
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS confirmed_orders (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(255) NOT NULL,
+            product VARCHAR(255) NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
     
-    if is_postgres:
-        # PostgreSQL tables
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS confirmed_orders (
-                id SERIAL PRIMARY KEY,
-                session_id VARCHAR(255) NOT NULL,
-                product VARCHAR(255) NOT NULL,
-                quantity INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Create global orders view
-        cur.execute('''
-            CREATE OR REPLACE VIEW global_orders AS
-            SELECT product, SUM(quantity) as total_quantity 
-            FROM confirmed_orders 
-            GROUP BY product 
-            ORDER BY total_quantity DESC
-        ''')
-    else:
-        # SQLite tables
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS confirmed_orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                product TEXT NOT NULL,
-                quantity INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # For SQLite, we'll use a function instead of a view for global orders
+    # Create global orders view (summarized for everyone to see)
+    cur.execute('''
+        CREATE OR REPLACE VIEW global_orders AS
+        SELECT product, SUM(quantity) as total_quantity 
+        FROM confirmed_orders 
+        GROUP BY product 
+        ORDER BY total_quantity DESC
+    ''')
     
     conn.commit()
     cur.close()
@@ -412,7 +391,6 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
 
     return parsed_orders, working_db
 
-
 # ---------- Initialize products_db ----------
 products_db = [
     ["limão", 0],
@@ -422,7 +400,7 @@ products_db = [
     ["caixa de ovos", 0], ["ovo", 0], ["queijo", 0]
 ]
 
-# ---------- Enhanced OrderBot with Database Persistence ----------
+# ---------- Enhanced OrderBot with PostgreSQL Persistence ----------
 user_sessions = {}
 session_lock = threading.Lock()
 
@@ -442,26 +420,17 @@ class OrderSession:
         self.waiting_for_option = False
 
     def _save_final_orders(self, orders_list):
-        """Save final confirmed orders to database"""
+        """Save final confirmed orders to PostgreSQL database"""
         conn = get_db_connection()
         cur = conn.cursor()
         
         for order in orders_list:
             for product, qty in order.items():
                 if qty > 0:
-                    # Check database type for parameter style
-                    if os.environ.get('DATABASE_URL'):
-                        # PostgreSQL
-                        cur.execute(
-                            'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (%s, %s, %s)',
-                            (self.session_id, product, qty)
-                        )
-                    else:
-                        # SQLite
-                        cur.execute(
-                            'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (?, ?, ?)',
-                            (self.session_id, product, qty)
-                        )
+                    cur.execute(
+                        'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (%s, %s, %s)',
+                        (self.session_id, product, qty)
+                    )
         
         conn.commit()
         cur.close()
@@ -470,31 +439,20 @@ class OrderSession:
     def get_global_orders(self):
         """Get all confirmed orders from database (for sidebar display)"""
         conn = get_db_connection()
-        cur = conn.cursor()
+        cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders GROUP BY product ORDER BY total_quantity DESC')
-        
-        orders_data = cur.fetchall()
-        
-        # Always access by index - works for both SQLite and PostgreSQL
-        orders = {}
-        for row in orders_data:
-            product = row[0]      # First column
-            quantity = row[1]     # Second column
-            if product and quantity:
-                orders[product] = quantity
+        cur.execute('SELECT * FROM global_orders')
+        orders = cur.fetchall()
         
         cur.close()
         conn.close()
         
-        return orders
+        # Convert to simple dict format
+        return {order['product']: order['total_quantity'] for order in orders}
 
     def get_all_orders_summary(self):
         """Get summary of all orders from database (for Excel download)"""
         return self.get_global_orders()
-
-    # ... (rest of your OrderSession methods remain exactly the same)
-    # [Keep all your existing start_new_conversation, add_item, process_message, etc. methods]
 
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
@@ -767,7 +725,7 @@ def get_user_session(session_id):
             user_sessions[session_id] = OrderSession(session_id)
         return user_sessions[session_id]
 
-# ---------- Flask routes (unchanged) ----------
+# ---------- Flask routes ----------
 @app.route("/")
 def index():
     session_id = request.args.get('session_id', str(uuid.uuid4()))
