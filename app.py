@@ -35,6 +35,49 @@ def get_db_connection():
         conn.row_factory = sqlite3.Row
         return conn
 
+def update_db_schema():
+    """Update existing database schema to add missing columns"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Check if we're using PostgreSQL or SQLite
+    is_postgres = os.environ.get('DATABASE_URL') is not None
+    
+    try:
+        # Check if status column exists
+        if is_postgres:
+            cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name='confirmed_orders' and column_name='status'
+            """)
+        else:
+            cur.execute("PRAGMA table_info(confirmed_orders)")
+            columns = [row[1] for row in cur.fetchall()]
+        
+        if is_postgres:
+            column_exists = cur.fetchone() is not None
+        else:
+            column_exists = 'status' in columns
+            
+        if not column_exists:
+            print("Adding status column to confirmed_orders table...")
+            if is_postgres:
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status VARCHAR(20) DEFAULT 'confirmed'")
+            else:
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status TEXT DEFAULT 'confirmed'")
+            conn.commit()
+            print("Status column added successfully")
+        else:
+            print("Status column already exists")
+            
+    except Exception as e:
+        print(f"Schema update error: {e}")
+        conn.rollback()
+    finally:
+        cur.close()
+        conn.close()
+
 def init_db():
     """Initialize database tables"""
     try:
@@ -78,6 +121,7 @@ def init_db():
         
 # Initialize database on startup
 init_db()
+update_db_schema()
 
 # ---------- Core Order Processing Functions (UNCHANGED) ----------
 # [Keep all your existing functions: normalize, levenshtein_distance, similarity_percentage, 
