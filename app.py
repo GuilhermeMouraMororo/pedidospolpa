@@ -22,7 +22,7 @@ def get_db_connection():
     if not database_url:
         # Fallback for local development
         database_url = "postgresql://username:password@localhost:5432/order_bot"
-    
+
     conn = psycopg2.connect(database_url)
     return conn
 
@@ -30,7 +30,7 @@ def init_db():
     """Initialize database tables"""
     conn = get_db_connection()
     cur = conn.cursor()
-    
+
     # Create orders table for confirmed orders
     cur.execute('''
         CREATE TABLE IF NOT EXISTS confirmed_orders (
@@ -41,7 +41,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
+
     # Create global orders view (summarized for everyone to see)
     cur.execute('''
         CREATE OR REPLACE VIEW global_orders AS
@@ -50,7 +50,7 @@ def init_db():
         GROUP BY product 
         ORDER BY total_quantity DESC
     ''')
-    
+
     conn.commit()
     cur.close()
     conn.close()
@@ -164,7 +164,7 @@ def separate_numbers_and_words(text):
 def extract_numbers_and_positions(tokens):
     """Extract all numbers and their positions from tokens"""
     numbers = []
-    
+
     i = 0
     while i < len(tokens):
         if tokens[i].isdigit():
@@ -174,7 +174,7 @@ def extract_numbers_and_positions(tokens):
             # Only combine number words if they're connected by "e"
             num_tokens = [tokens[i]]
             j = i + 1
-            
+
             # Look for "e" followed by a number word
             while j < len(tokens) - 1:
                 if tokens[j] == "e" and tokens[j+1] in word2num_all:
@@ -182,7 +182,7 @@ def extract_numbers_and_positions(tokens):
                     j += 2
                 else:
                     break
-            
+
             # Parse the number tokens
             number = parse_number_words([t for t in num_tokens if t != "e"])
             if number:
@@ -192,14 +192,14 @@ def extract_numbers_and_positions(tokens):
                 i += 1
         else:
             i += 1
-            
+
     return numbers
 
 def find_associated_number(product_position, all_tokens, numbers_with_positions):
     """Find the number associated with a product based on word order patterns"""
     if not numbers_with_positions:
         return 1, None
-    
+
     # Pattern 1: Number immediately before the product (most common)
     if product_position > 0:
         prev_token = all_tokens[product_position - 1]
@@ -207,14 +207,14 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions)
             for pos, val in numbers_with_positions:
                 if pos == product_position - 1:
                     return val, pos
-    
+
     # Pattern 2: Look for numbers before the product (anywhere before)
     numbers_before = [(pos, val) for pos, val in numbers_with_positions if pos < product_position]
     if numbers_before:
         # Return the closest number before the product (highest position number before product)
         closest_before = max(numbers_before, key=lambda x: x[0])
         return closest_before[1], closest_before[0]
-    
+
     # Pattern 3: Number immediately after the product
     if product_position + 1 < len(all_tokens):
         next_token = all_tokens[product_position + 1]
@@ -222,14 +222,14 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions)
             for pos, val in numbers_with_positions:
                 if pos == product_position + 1:
                     return val, pos
-    
+
     # Pattern 4: Look for numbers after the product (anywhere after)
     numbers_after = [(pos, val) for pos, val in numbers_with_positions if pos > product_position]
     if numbers_after:
         # Return the closest number after the product (lowest position number after product)
         closest_after = min(numbers_after, key=lambda x: x[0])
         return closest_after[1], closest_after[0]
-    
+
     return 1, None
 
 def parse_order_interactive(message, products_db, similarity_threshold=80, uncertain_range=(60, 80)):
@@ -243,14 +243,14 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
     message = re.sub(r"\s+", " ", message).strip()
 
     tokens = message.split()
-    
+
     # Start with the current database state (accumulate items)
     working_db = deepcopy(products_db)
     parsed_orders = []
 
     # Extract all numbers and their positions
     numbers_with_positions = extract_numbers_and_positions(tokens)
-    
+
     # Sort products by word count (longest first) to prioritize multi-word matches
     product_names = [p for p, _ in products_db]
     sorted_products = sorted([(p, i) for i, p in enumerate(product_names)], 
@@ -281,12 +281,12 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
             continue
 
         matched = False
-        
+
         # Try different phrase lengths (longest first) - prioritize multi-word products
         for size in range(min(max_prod_words, 4), 0, -1):
             if i + size > len(tokens):
                 continue
-                
+
             # Skip if any token in the phrase is already used or is a number/filler (unless part of product)
             phrase_tokens = tokens[i:i+size]
             skip_phrase = False
@@ -298,17 +298,17 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                 if (t.isdigit() or t in word2num_all or (t in filler_words and t not in product_words)):
                     skip_phrase = True
                     break
-                    
+
             if skip_phrase:
                 continue
-                
+
             phrase = " ".join(phrase_tokens)
             phrase_norm = normalize(phrase)
 
             best_score = 0
             best_product = None
             best_original_idx = None
-            
+
             # Find best match for this phrase length (check against sorted products)
             for idx, (prod_name, orig_idx) in enumerate(sorted_products):
                 prod_norm = normalize(prod_name)
@@ -322,7 +322,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
             if best_score >= similarity_threshold:
                 # Find associated number for this product
                 quantity, number_position = find_associated_number(i, tokens, numbers_with_positions)
-                
+
                 # If number position is already used, try to find another number
                 if number_position is not None and number_position in used_numbers:
                     # Look for any unused number
@@ -331,17 +331,17 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                             quantity = val
                             number_position = pos
                             break
-                
+
                 # Update the working database (add to existing quantity)
                 working_db[best_original_idx][1] += quantity
                 parsed_orders.append({"product": best_product, "qty": quantity, "score": round(best_score,2)})
-                
+
                 # Mark positions as used
                 for j in range(size):
                     used_positions.add(i + j)
                 if number_position is not None:
                     used_numbers.add(number_position)
-                
+
                 i += size
                 matched = True
                 break
@@ -353,18 +353,18 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
             best_score = 0
             best_original_idx = None
             phrase_norm = normalize(phrase)
-            
+
             for idx, product in enumerate(product_names):
                 score = similarity_percentage(phrase_norm, normalize(product))
                 if score > best_score:
                     best_score = score
                     best_match = product
                     best_original_idx = idx
-            
+
             if best_match and best_score > 50:
                 # Auto-confirm reasonable matches for web version
                 quantity, number_position = find_associated_number(i, tokens, numbers_with_positions)
-                
+
                 # If number position is already used, try to find another number
                 if number_position is not None and number_position in used_numbers:
                     for pos, val in numbers_with_positions:
@@ -372,7 +372,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                             quantity = val
                             number_position = pos
                             break
-                
+
                 # Update the working database (add to existing quantity)
                 working_db[best_original_idx][1] += quantity
                 parsed_orders.append({
@@ -380,13 +380,13 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                     "qty": quantity,
                     "score": round(best_score, 2)
                 })
-                        
+
                 used_positions.add(i)
                 if number_position is not None:
                     used_numbers.add(number_position)
-                
+
                 matched = True
-            
+
             i += 1
 
     return parsed_orders, working_db
@@ -411,7 +411,7 @@ class OrderSession:
         self.current_db = deepcopy(products_db)
         self.confirmed_orders = []
         self.pending_orders = []
-        
+
         self.state = "collecting"
         self.reminder_count = 0
         self.message_queue = queue.Queue()
@@ -423,7 +423,7 @@ class OrderSession:
         """Save final confirmed orders to PostgreSQL database"""
         conn = get_db_connection()
         cur = conn.cursor()
-        
+
         for order in orders_list:
             for product, qty in order.items():
                 if qty > 0:
@@ -431,7 +431,7 @@ class OrderSession:
                         'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (%s, %s, %s)',
                         (self.session_id, product, qty)
                     )
-        
+
         conn.commit()
         cur.close()
         conn.close()
@@ -440,13 +440,13 @@ class OrderSession:
         """Get all confirmed orders from database (for sidebar display)"""
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        
+
         cur.execute('SELECT * FROM global_orders')
         orders = cur.fetchall()
-        
+
         cur.close()
         conn.close()
-        
+
         # Convert to simple dict format
         return {order['product']: order['total_quantity'] for order in orders}
 
@@ -462,7 +462,7 @@ class OrderSession:
         self.waiting_for_option = False
         self._cancel_timer()
         self.message_queue.put("🔄 **Conversa reiniciada!**")
-        
+
     def add_item(self, parsed_orders):
         """Add parsed items to current database - simplified"""
         for order in parsed_orders:
@@ -470,37 +470,37 @@ class OrderSession:
                 if product == order["product"]:
                     self.current_db[idx][1] += order["qty"]
                     break
-        
+
         self.state = "collecting"
         self._start_inactivity_timer()
 
     def reset_cycle(self, parsed_orders):
         """Reset cycle and add items during confirmation phase - simplified"""
         self._cancel_timer()
-        
+
         for order in parsed_orders:
             for idx, (product, _) in enumerate(self.current_db):
                 if product == order["product"]:
                     self.current_db[idx][1] += order["qty"]
                     break
-        
+
         self.state = "collecting"
         self.reminder_count = 0
         self._start_inactivity_timer()
-            
+
     def _start_inactivity_timer(self):
         """Start 30-second inactivity timer"""
         self._cancel_timer()
         self.active_timer = threading.Timer(30.0, self._send_summary)
         self.active_timer.daemon = True
         self.active_timer.start()
-    
+
     def _cancel_timer(self):
         """Cancel active timer"""
         if self.active_timer:
             self.active_timer.cancel()
             self.active_timer = None
-    
+
     def _send_summary(self):
         """Send summary and start confirmation cycle"""
         if self.state == "collecting" and self.has_items():
@@ -511,7 +511,7 @@ class OrderSession:
             self._start_reminder_cycle()
         elif self.state == "collecting":
             self._start_inactivity_timer()
-        
+
     def _start_reminder_cycle(self):
         """Start reminder cycle - first reminder after 30 seconds"""
         self.reminder_count = 1
@@ -525,7 +525,7 @@ class OrderSession:
         if self.state == "confirming" and self.reminder_count <= 5:
             summary = self._build_summary()
             self.message_queue.put(f"🔔 **LEMBRETE ({self.reminder_count}/5):**\n{summary}")
-            
+
             if self.reminder_count == 5:
                 self._mark_as_pending()
             else:
@@ -534,7 +534,7 @@ class OrderSession:
                 self.active_timer = threading.Timer(30.0, self._send_reminder)
                 self.active_timer.daemon = True
                 self.active_timer.start()
-    
+
     def _mark_as_pending(self):
         """Mark current order as pending"""
         if self.has_items():
@@ -543,7 +543,7 @@ class OrderSession:
             self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
             self._reset_current()
             self.state = "pending_confirmation"
-    
+
     def _build_summary(self):
         """Build summary message"""
         summary = "📋 **RESUMO DO SEU PEDIDO:**\n"
@@ -552,17 +552,17 @@ class OrderSession:
                 summary += f"• {product}: {qty}\n"
         summary += "\n⚠️ **Confirma o pedido?** (responda com 'confirmar' ou 'nao')"
         return summary
-    
+
     def _check_cancel_command(self, message_lower):
         """Check if message contains cancel commands"""
         cancel_commands = ['cancelar', 'hoje não', 'hoje nao']
         return any(command in message_lower for command in cancel_commands)
-    
+
     def process_message(self, message):
         """Process incoming message"""
         message_lower = message.lower().strip()
         self.last_activity = time.time()
-        
+
         # Check for cancel commands in ANY state
         if self._check_cancel_command(message_lower):
             self.start_new_conversation()
@@ -570,7 +570,7 @@ class OrderSession:
                 'success': True,
                 'message': None
             }
-        
+
         # Handle waiting_for_next state
         if self.state == "waiting_for_next":
             self.state = "option"
@@ -579,7 +579,7 @@ class OrderSession:
                 'success': True,
                 'message': "🔄 **Conversa reiniciada!**\n\nVocê quer pedir(1) ou falar com o gerente(2)?"
             }
-        
+
         # Handle option state
         if self.state == "option" and self.waiting_for_option:
             if message_lower == "1":
@@ -602,7 +602,7 @@ class OrderSession:
                     'success': False,
                     'message': "Por favor, escolha uma opção: 1 para pedir ou 2 para falar com o gerente."
                 }
-        
+
         # Handle pending confirmation state
         if self.state == "pending_confirmation":
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
@@ -633,7 +633,7 @@ class OrderSession:
                     return {'success': True}
                 else:
                     return {'success': True, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
-        
+
         # Handle confirmation state
         if self.state == "confirming":
             if any(word in message_lower.split() for word in ['confirmar', 'sim', 's']):
@@ -642,13 +642,13 @@ class OrderSession:
                 self.confirmed_orders.append(confirmed_order)
                 self._save_final_orders([confirmed_order])
                 self._reset_current()
-                
+
                 response = "✅ **PEDIDO CONFIRMADO COM SUCESSO!**\n\n**Itens confirmados:**\n"
                 for product, qty in confirmed_order.items():
                     if qty > 0:
                         response += f"• {qty}x {product}\n"
                 response += "\nObrigado pelo pedido! 🎉"
-                
+
                 return {
                     'success': True,
                     'message': response
@@ -675,7 +675,7 @@ class OrderSession:
                         'success': False,
                         'message': "❌ Item não reconhecido. Digite 'confirmar' para confirmar ou 'nao' para cancelar."
                     }
-        
+
         # Handle collection state
         elif self.state in ["collecting"]:
             if message_lower in ['pronto', 'confirmar']:
@@ -693,24 +693,24 @@ class OrderSession:
                 else:
                     self._start_inactivity_timer()
                     return {'success': False, 'message': "❌ Nenhum item reconhecido. Tente usar termos como '2 mangas', 'cinco queijos', etc."}
-        
+
         return {'success': False, 'message': "Estado não reconhecido. Digite 'cancelar' para reiniciar."}
-        
+
     def has_items(self):
         """Check if there are any items in the order"""
         return any(qty > 0 for _, qty in self.current_db)
-    
+
     def get_current_orders(self):
         """Get current orders as dict"""
         return {product: qty for product, qty in self.current_db if qty > 0}
-    
+
     def _reset_current(self):
         """Reset current session (temp items) completely"""
         self.current_db = deepcopy(self.products_db)
         self.state = "collecting"
         self.reminder_count = 0
         self._cancel_timer()
-    
+
     def get_pending_message(self):
         """Get pending message if any"""
         try:
@@ -739,20 +739,20 @@ def download_excel():
     """Generate Excel file from database"""
     session = OrderSession("global")
     orders = session.get_all_orders_summary()
-    
+
     # Create Excel file in memory
     wb = Workbook()
     ws = wb.active
     ws.append(["Produto", "Quantidade"])
-    
+
     for product, quantity in orders.items():
         ws.append([product, quantity])
-    
+
     # Save to BytesIO object
     excel_file = BytesIO()
     wb.save(excel_file)
     excel_file.seek(0)
-    
+
     return send_file(
         excel_file,
         as_attachment=True,
@@ -772,23 +772,23 @@ def send_message():
     data = request.json
     message = data.get("message", "").strip()
     session_id = data.get("session_id", "default")
-    
+
     if not message:
         return jsonify({'error': 'Mensagem vazia'})
-    
+
     session = get_user_session(session_id)
     result = session.process_message(message)
-    
+
     response = {
         'status': session.state,
         'current_orders': session.get_current_orders(),
         'confirmed_orders': session.confirmed_orders,
         'pending_orders': session.pending_orders
     }
-    
+
     if result.get('message'):
         response['bot_message'] = result['message']
-    
+
     return jsonify(response)
 
 @app.route("/get_updates", methods=["POST"])
@@ -796,10 +796,10 @@ def get_updates():
     """Get updates including pending messages and session state"""
     data = request.json
     session_id = data.get("session_id", "default")
-    
+
     session = get_user_session(session_id)
     pending_message = session.get_pending_message()
-    
+
     response = {
         'state': session.state,
         'current_orders': session.get_current_orders(),
@@ -808,10 +808,10 @@ def get_updates():
         'reminders_sent': session.reminder_count,
         'has_message': pending_message is not None
     }
-    
+
     if pending_message:
         response['bot_message'] = pending_message
-    
+
     return jsonify(response)
 
 @app.route("/get_orders", methods=["GET"])
@@ -829,10 +829,10 @@ def reset_session():
     """Reset session manually"""
     data = request.json
     session_id = data.get("session_id", "default")
-    
+
     session = get_user_session(session_id)
     session.start_new_conversation()
-    
+
     return jsonify({'success': True})
 
 if __name__ == "__main__":
