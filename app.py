@@ -1,6 +1,5 @@
+import sqlite3
 import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from flask import Flask, render_template, request, jsonify, send_file
 import re
 import unicodedata
@@ -13,48 +12,70 @@ from openpyxl import Workbook
 from io import BytesIO
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 
-# --------- Database setup ----------
+# --------- Database setup (SQLite for local development) ----------
 def get_db_connection():
     # Render provides DATABASE_URL environment variable
     database_url = os.environ.get('DATABASE_URL')
-    if not database_url:
-        # Fallback for local development
-        database_url = "postgresql://username:password@localhost:5432/order_bot"
     
-    conn = psycopg2.connect(database_url)
-    return conn
+    if database_url:
+        # Fix for Render's PostgreSQL URL
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        
+        # Production - use PostgreSQL
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        conn = psycopg2.connect(database_url)
+        return conn
+    else:
+        # Local development - use SQLite
+        conn = sqlite3.connect('local_orders.db')
+        conn.row_factory = sqlite3.Row
+        return conn
 
 def init_db():
     """Initialize database tables"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Create orders table for confirmed orders
-    cur.execute('''
-        CREATE TABLE IF NOT EXISTS confirmed_orders (
-            id SERIAL PRIMARY KEY,
-            session_id VARCHAR(255) NOT NULL,
-            product VARCHAR(255) NOT NULL,
-            quantity INTEGER NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    
-    # Create global orders view (summarized for everyone to see)
-    cur.execute('''
-        CREATE OR REPLACE VIEW global_orders AS
-        SELECT product, SUM(quantity) as total_quantity 
-        FROM confirmed_orders 
-        GROUP BY product 
-        ORDER BY total_quantity DESC
-    ''')
-    
-    conn.commit()
-    cur.close()
-    conn.close()
-
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Check if we're using PostgreSQL or SQLite
+        is_postgres = os.environ.get('DATABASE_URL') is not None
+        
+        if is_postgres:
+            # PostgreSQL tables
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS confirmed_orders (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(255) NOT NULL,
+                    product VARCHAR(255) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status VARCHAR(20) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        else:
+            # SQLite tables
+            cur.execute('''
+                CREATE TABLE IF NOT EXISTS confirmed_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    product TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+    finally:
+        cur.close()
+        conn.close()
+        
 # Initialize database on startup
 init_db()
 
@@ -391,6 +412,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
 
     return parsed_orders, working_db
 
+
 # ---------- Initialize products_db ----------
 products_db = [
     ["limão", 0],
@@ -400,7 +422,7 @@ products_db = [
     ["caixa de ovos", 0], ["ovo", 0], ["queijo", 0]
 ]
 
-# ---------- Enhanced OrderBot with PostgreSQL Persistence ----------
+# ---------- Enhanced OrderBot with Database Persistence ----------
 user_sessions = {}
 session_lock = threading.Lock()
 
@@ -419,18 +441,28 @@ class OrderSession:
         self.last_activity = time.time()
         self.waiting_for_option = False
 
-    def _save_final_orders(self, orders_list):
-        """Save final confirmed orders to PostgreSQL database"""
+    def _save_final_orders(self, orders_list, status="confirmed"):
         conn = get_db_connection()
         cur = conn.cursor()
+        
+        # Check if we're using PostgreSQL or SQLite
+        is_postgres = os.environ.get('DATABASE_URL') is not None
         
         for order in orders_list:
             for product, qty in order.items():
                 if qty > 0:
-                    cur.execute(
-                        'INSERT INTO confirmed_orders (session_id, product, quantity) VALUES (%s, %s, %s)',
-                        (self.session_id, product, qty)
-                    )
+                    if is_postgres:
+                        # PostgreSQL uses %s placeholders
+                        cur.execute(
+                            'INSERT INTO confirmed_orders (session_id, product, quantity, status) VALUES (%s, %s, %s, %s)',
+                            (self.session_id, product, qty, status)
+                        )
+                    else:
+                        # SQLite uses ? placeholders
+                        cur.execute(
+                            'INSERT INTO confirmed_orders (session_id, product, quantity, status) VALUES (?, ?, ?, ?)',
+                            (self.session_id, product, qty, status)
+                        )
         
         conn.commit()
         cur.close()
@@ -439,20 +471,37 @@ class OrderSession:
     def get_global_orders(self):
         """Get all confirmed orders from database (for sidebar display)"""
         conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        cur = conn.cursor()
         
-        cur.execute('SELECT * FROM global_orders')
-        orders = cur.fetchall()
+        # Check if we're using PostgreSQL or SQLite
+        is_postgres = os.environ.get('DATABASE_URL') is not None
+        
+        if is_postgres:
+            cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders WHERE status = %s GROUP BY product ORDER BY total_quantity DESC', ('confirmed',))
+        else:
+            cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders WHERE status = ? GROUP BY product ORDER BY total_quantity DESC', ('confirmed',))
+        
+        orders_data = cur.fetchall()
+        
+        # Always access by index - works for both SQLite and PostgreSQL
+        orders = {}
+        for row in orders_data:
+            product = row[0]      # First column
+            quantity = row[1]     # Second column
+            if product and quantity:
+                orders[product] = quantity
         
         cur.close()
         conn.close()
         
-        # Convert to simple dict format
-        return {order['product']: order['total_quantity'] for order in orders}
+        return orders
 
     def get_all_orders_summary(self):
         """Get summary of all orders from database (for Excel download)"""
         return self.get_global_orders()
+
+    # ... (rest of your OrderSession methods remain exactly the same)
+    # [Keep all your existing start_new_conversation, add_item, process_message, etc. methods]
 
     def start_new_conversation(self):
         """Reset for a new conversation and wait for next message"""
@@ -491,7 +540,7 @@ class OrderSession:
     def _start_inactivity_timer(self):
         """Start 30-second inactivity timer"""
         self._cancel_timer()
-        self.active_timer = threading.Timer(30.0, self._send_summary)
+        self.active_timer = threading.Timer(5.0, self._send_summary)
         self.active_timer.daemon = True
         self.active_timer.start()
     
@@ -516,7 +565,7 @@ class OrderSession:
         """Start reminder cycle - first reminder after 30 seconds"""
         self.reminder_count = 1
         self._cancel_timer()
-        self.active_timer = threading.Timer(30.0, self._send_reminder)
+        self.active_timer = threading.Timer(5.0, self._send_reminder)
         self.active_timer.daemon = True
         self.active_timer.start()
 
@@ -531,9 +580,10 @@ class OrderSession:
             else:
                 self.reminder_count += 1
                 self._cancel_timer()
-                self.active_timer = threading.Timer(30.0, self._send_reminder)
+                self.active_timer = threading.Timer(5.0, self._send_reminder)
                 self.active_timer.daemon = True
                 self.active_timer.start()
+                
     
     def _mark_as_pending(self):
         """Mark current order as pending"""
@@ -543,6 +593,10 @@ class OrderSession:
             self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
             self._reset_current()
             self.state = "pending_confirmation"
+            self._save_final_orders([pending_order], status="pending")
+
+
+
     
     def _build_summary(self):
         """Build summary message"""
@@ -617,12 +671,19 @@ class OrderSession:
                         'success': True,
                         'message': f"✅ **PEDIDO PENDENTE CONFIRMADO!** {pending_count} pedido(s) adicionado(s) à lista."
                     }
-                else:
+                elif any(word in message_lower.split() for word in ['cancelar', 'nao', 'não', 'n']):
+                    # Add cancellation logic here - clear pending orders and reset state
+                    self.pending_orders = []
                     self.state = "collecting"
                     self._start_inactivity_timer()
                     return {
                         'success': True,
-                        'message': "🔄 Nenhum pedido pendente. Continue adicionando itens."
+                        'message': "🔄 Pedidos pendentes cancelados. Continue adicionando itens."
+                    }
+                else:
+                    return {
+                        'success': False,
+                        'message': "❌ Por favor, confirme ou cancele o pedido pendente. Digite 'confirmar' para confirmar ou 'cancelar' para cancelar."
                     }
             else:
                 self.state = "collecting"
@@ -725,7 +786,7 @@ def get_user_session(session_id):
             user_sessions[session_id] = OrderSession(session_id)
         return user_sessions[session_id]
 
-# ---------- Flask routes ----------
+# ---------- Flask routes (unchanged) ----------
 @app.route("/")
 def index():
     session_id = request.args.get('session_id', str(uuid.uuid4()))
@@ -824,6 +885,30 @@ def get_orders():
         'pending_orders': session.pending_orders
     })
 
+@app.route("/confirm_pending_order", methods=["POST"])
+def confirm_pending_order():
+    data = request.json
+    session_id = data.get("session_id", "default")
+    order_index = data.get("order_index", 0)
+    
+    session = get_user_session(session_id)
+    
+    if session.pending_orders and order_index < len(session.pending_orders):
+        # Move from pending to confirmed
+        confirmed_order = session.pending_orders.pop(order_index)
+        session.confirmed_orders.append(confirmed_order)
+        session._save_final_orders([confirmed_order])
+        
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'message': 'Pedido pendente não encontrado'})
+
+@app.route("/confirm_order", methods=["POST"])
+def confirm_order():
+    data = request.json
+    order_id = data.get("order_id")
+    # Update database: set status='confirmed' where id=order_id
+
 @app.route("/reset_session", methods=["POST"])
 def reset_session():
     """Reset session manually"""
@@ -836,4 +921,5 @@ def reset_session():
     return jsonify({'success': True})
 
 if __name__ == "__main__":
-    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
