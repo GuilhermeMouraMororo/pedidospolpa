@@ -10,7 +10,61 @@
             padding: 0;
             box-sizing: border-box;
         }
-        
+
+        .auto-order-box {
+            border: 2px solid #eab308;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            background: #fefce8;
+            overflow: hidden;
+        }
+
+        .auto-order-header {
+            background: #eab308;
+            color: white;
+            padding: 8px 12px;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        .auto-order-actions {
+            display: flex;
+            gap: 10px;
+            padding: 10px;
+            background: #fefce8;
+            border-top: 1px solid #eab308;
+        }
+
+        .confirm-btn {
+            background: #10b981 !important;
+            color: white !important;
+            border: none !important;
+            padding: 8px 12px !important;
+            border-radius: 5px !important;
+            font-size: 12px !important;
+            cursor: pointer !important;
+            flex: 1;
+        }
+
+        .delete-btn {
+            background: #ef4444 !important;
+            color: white !important;
+            border: none !important;
+            padding: 8px 12px !important;
+            border-radius: 5px !important;
+            font-size: 12px !important;
+            cursor: pointer !important;
+            flex: 1;
+        }
+
+        .confirm-btn:hover {
+            background: #059669 !important;
+        }
+
+        .delete-btn:hover {
+            background: #dc2626 !important;
+        }
+                
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -281,6 +335,15 @@
             border-left: 4px solid #eab308;
             background: #fefce8;
         }
+
+        .pending-quantity {
+            background: #eab308;
+        }
+
+        .pending-item {
+            border-left: 4px solid #eab308;
+            background: #fefce8;
+        }
         
         .product-name {
             font-weight: 600;
@@ -440,6 +503,17 @@
                     </div>
                 </div>
                 
+                <!-- Auto-Confirmed Orders Section -->
+                <div class="order-section">
+                    <div class="section-header pending-header">
+                        <span>🟡 Pedidos Confirmados Automaticamente</span>
+                        <span id="autoOrdersCount">0</span>
+                    </div>
+                    <div id="autoConfirmedOrders">
+                        <div class="empty-orders">Nenhum pedido automático</div>
+                    </div>
+                </div>
+
                 <!-- Current User's Orders Sections -->
                 <div class="order-section">
                     <div class="section-header confirmed-header">
@@ -448,16 +522,6 @@
                     </div>
                     <div id="confirmedOrders">
                         <div class="empty-orders">Nenhum pedido confirmado</div>
-                    </div>
-                </div>
-                
-                <div class="order-section">
-                    <div class="section-header pending-header">
-                        <span>🟡 Seus Pedidos Pendentes</span>
-                        <span id="pendingCount">0</span>
-                    </div>
-                    <div id="pendingOrders">
-                        <div class="empty-orders">Nenhum pedido pendente</div>
                     </div>
                 </div>
             </div>
@@ -477,38 +541,60 @@
             updateInterval = setInterval(checkUpdates, 2000);
         }
 
-        function startGlobalOrdersPolling() {
-            if (globalOrdersInterval) clearInterval(globalOrdersInterval);
-            globalOrdersInterval = setInterval(loadGlobalOrders, 5000); // Refresh global orders every 5 seconds
-            loadGlobalOrders(); // Load immediately
-        }
-    
-        async function confirmPendingOrder(orderIndex) {
+        async function confirmAutoOrder(orderGroup) {
             try {
-                const response = await fetch('/confirm_pending_order', {
+                const response = await fetch('/confirm_auto_order', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        session_id: sessionId,
-                        order_index: orderIndex
-                    })
+                    body: JSON.stringify({ order_group: orderGroup })
                 });
                 
                 const data = await response.json();
                 
                 if (data.success) {
-                    addMessage("✅ **PEDIDO PENDENTE CONFIRMADO!** O pedido foi movido para confirmados.", 'bot', 'success');
-                    // Refresh the display
-                    checkUpdates();
-                    loadGlobalOrders();
+                    addMessage("✅ **PEDIDO AUTOMÁTICO CONFIRMADO!** Os itens foram adicionados ao total principal.", 'bot', 'success');
+                    loadGlobalOrders(); // Refresh the display
                 } else {
-                    addMessage("❌ Erro ao confirmar pedido: " + data.message, 'bot', 'alert');
+                    addMessage("❌ Erro ao confirmar pedido automático.", 'bot', 'alert');
                 }
             } catch (error) {
-                console.error('Error confirming order:', error);
+                console.error('Error confirming auto order:', error);
                 addMessage('❌ Erro de conexão ao confirmar pedido.', 'bot', 'alert');
             }
         }
+
+        async function deleteAutoOrder(orderGroup) {
+            if (!confirm('Tem certeza que deseja excluir este pedido automático?')) {
+                return;
+            }
+            
+            try {
+                const response = await fetch('/delete_auto_order', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ order_group: orderGroup })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    addMessage("🗑️ **PEDIDO AUTOMÁTICO EXCLUÍDO!**", 'bot', 'alert');
+                    loadGlobalOrders(); // Refresh the display
+                } else {
+                    addMessage("❌ Erro ao excluir pedido automático.", 'bot', 'alert');
+                }
+            } catch (error) {
+                console.error('Error deleting auto order:', error);
+                addMessage('❌ Erro de conexão ao excluir pedido.', 'bot', 'alert');
+            }
+        }
+
+        function startGlobalOrdersPolling() {
+            if (globalOrdersInterval) clearInterval(globalOrdersInterval);
+            globalOrdersInterval = setInterval(loadGlobalOrders, 5000); // Refresh global orders every 5 seconds
+            loadGlobalOrders(); // Load immediately
+        }
+        
 
         async function loadGlobalOrders() {
             try {
@@ -522,21 +608,48 @@
 
         function updateGlobalOrdersDisplay(globalOrders) {
             const globalOrdersContainer = document.getElementById('globalOrders');
+            const autoOrdersContainer = document.getElementById('autoConfirmedOrders');
             const globalCount = document.getElementById('globalCount');
+            const autoCount = document.getElementById('autoOrdersCount');
             
-            if (Object.keys(globalOrders).length === 0) {
+            // Update main orders (blue boxes)
+            if (globalOrders.main_orders && Object.keys(globalOrders.main_orders).length > 0) {
+                globalCount.textContent = Object.keys(globalOrders.main_orders).length;
+                globalOrdersContainer.innerHTML = Object.entries(globalOrders.main_orders).map(([product, quantity]) => 
+                    `<div class="order-item global-item">
+                        <span class="product-name">${product}</span>
+                        <span class="product-quantity global-quantity">${quantity}</span>
+                    </div>`
+                ).join('');
+            } else {
                 globalCount.textContent = '0';
                 globalOrdersContainer.innerHTML = '<div class="empty-orders">Nenhum pedido global ainda</div>';
-                return;
             }
             
-            globalCount.textContent = Object.keys(globalOrders).length;
-            globalOrdersContainer.innerHTML = Object.entries(globalOrders).map(([product, quantity]) => 
-                `<div class="order-item global-item">
-                    <span class="product-name">${product}</span>
-                    <span class="product-quantity global-quantity">${quantity}</span>
-                </div>`
-            ).join('');
+            // Update auto-confirmed orders (yellow boxes)
+            if (globalOrders.auto_orders && Object.keys(globalOrders.auto_orders).length > 0) {
+                autoCount.textContent = Object.keys(globalOrders.auto_orders).length;
+                autoOrdersContainer.innerHTML = Object.entries(globalOrders.auto_orders).map(([orderGroup, products]) => 
+                    `<div class="auto-order-box">
+                        <div class="auto-order-header">
+                            <span>Pedido Automático</span>
+                        </div>
+                        ${Object.entries(products).map(([product, quantity]) => 
+                            `<div class="order-item pending-item">
+                                <span class="product-name">${product}</span>
+                                <span class="product-quantity pending-quantity">${quantity}</span>
+                            </div>`
+                        ).join('')}
+                        <div class="auto-order-actions">
+                            <button class="confirm-btn" onclick="confirmAutoOrder('${orderGroup}')">✅ Confirmar</button>
+                            <button class="delete-btn" onclick="deleteAutoOrder('${orderGroup}')">❌ Excluir</button>
+                        </div>
+                    </div>`
+                ).join('');
+            } else {
+                autoCount.textContent = '0';
+                autoOrdersContainer.innerHTML = '<div class="empty-orders">Nenhum pedido automático</div>';
+            }
         }
 
         function refreshGlobalOrders() {
@@ -624,59 +737,41 @@
             
             itemCount.textContent = Object.keys(data.current_orders).length;
             
-            // Show pending orders count in reminders status
-            const pendingCount = data.pending_orders ? data.pending_orders.length : 0;
-            remindersStatus.textContent = `${data.reminders_sent || 0}/5 (${pendingCount} pendente(s))`;
+            // Remove pending count from reminders status
+            remindersStatus.textContent = `${data.reminders_sent || 0}/5`;
         }
 
         function updateOrdersDisplay(data) {
             const confirmedOrders = document.getElementById('confirmedOrders');
-            const pendingOrders = document.getElementById('pendingOrders');
             const confirmedCount = document.getElementById('confirmedCount');
-            const pendingCount = document.getElementById('pendingCount');
             
-            // Update confirmed orders (keep existing code)
-            if (data.confirmed_orders && data.confirmed_orders.length > 0) {
-                confirmedCount.textContent = data.confirmed_orders.length;
-                confirmedOrders.innerHTML = data.confirmed_orders.map((order, index) => 
-                    `<div style="margin-bottom: 15px;">
-                        <div style="font-weight: bold; color: #065f46; margin-bottom: 5px; font-size: 14px;">Pedido ${index + 1}:</div>
+            // Combine confirmed_orders and pending_orders (which are now considered confirmed but yellow)
+            const allConfirmedOrders = [...(data.confirmed_orders || []), ...(data.pending_orders || [])];
+            
+            if (allConfirmedOrders.length > 0) {
+                confirmedCount.textContent = allConfirmedOrders.length;
+                confirmedOrders.innerHTML = allConfirmedOrders.map((order, index) => {
+                    // Check if this was originally a pending order (index >= confirmed_orders length)
+                    const isFormerPending = index >= (data.confirmed_orders?.length || 0);
+                    const itemClass = isFormerPending ? 'order-item pending-item' : 'order-item confirmed-item';
+                    const quantityClass = isFormerPending ? 'product-quantity pending-quantity' : 'product-quantity confirmed-quantity';
+                    const statusText = isFormerPending ? ' (Confirmado Automaticamente)' : '';
+                    
+                    return `<div style="margin-bottom: 15px;">
+                        <div style="font-weight: bold; color: ${isFormerPending ? '#92400e' : '#065f46'}; margin-bottom: 5px; font-size: 14px;">
+                            Pedido ${index + 1}${statusText}:
+                        </div>
                         ${Object.entries(order).map(([product, quantity]) => 
-                            `<div class="order-item confirmed-item">
+                            `<div class="${itemClass}">
                                 <span class="product-name">${product}</span>
-                                <span class="product-quantity confirmed-quantity">${quantity}</span>
+                                <span class="${quantityClass}">${quantity}</span>
                             </div>`
                         ).join('')}
-                    </div>`
-                ).join('');
+                    </div>`;
+                }).join('');
             } else {
                 confirmedCount.textContent = '0';
                 confirmedOrders.innerHTML = '<div class="empty-orders">Nenhum pedido confirmado</div>';
-            }
-            
-            // Update pending orders WITH CONFIRM BUTTONS
-            if (data.pending_orders && data.pending_orders.length > 0) {
-                pendingCount.textContent = data.pending_orders.length;
-                pendingOrders.innerHTML = data.pending_orders.map((order, index) => 
-                    `<div style="margin-bottom: 15px;">
-                        <div style="font-weight: bold; color: #92400e; margin-bottom: 5px; font-size: 14px; display: flex; justify-content: space-between; align-items: center;">
-                            <span>Pedido Pendente ${index + 1}:</span>
-                            <button class="confirm-btn" onclick="confirmPendingOrder(${index})" 
-                                    style="background: #10b981; color: white; border: none; padding: 6px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; transition: background 0.3s;">
-                                ✅ Confirmar
-                            </button>
-                        </div>
-                        ${Object.entries(order).map(([product, quantity]) => 
-                            `<div class="order-item pending-item">
-                                <span class="product-name">${product}</span>
-                                <span class="product-quantity pending-quantity">${quantity}</span>
-                            </div>`
-                        ).join('')}
-                    </div>`
-                ).join('');
-            } else {
-                pendingCount.textContent = '0';
-                pendingOrders.innerHTML = '<div class="empty-orders">Nenhum pedido pendente</div>';
             }
         }
         function addMessage(text, sender, messageType = 'normal') {
