@@ -44,12 +44,12 @@ def update_db_schema():
     is_postgres = os.environ.get('DATABASE_URL') is not None
     
     try:
-        # Check if status column exists
+        # Check if order_group column exists
         if is_postgres:
             cur.execute("""
                 SELECT column_name 
                 FROM information_schema.columns 
-                WHERE table_name='confirmed_orders' and column_name='status'
+                WHERE table_name='confirmed_orders' and column_name='order_group'
             """)
         else:
             cur.execute("PRAGMA table_info(confirmed_orders)")
@@ -58,18 +58,18 @@ def update_db_schema():
         if is_postgres:
             column_exists = cur.fetchone() is not None
         else:
-            column_exists = 'status' in columns
+            column_exists = 'order_group' in columns
             
         if not column_exists:
-            print("Adding status column to confirmed_orders table...")
+            print("Adding order_group column to confirmed_orders table...")
             if is_postgres:
-                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status VARCHAR(20) DEFAULT 'confirmed'")
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN order_group VARCHAR(50) DEFAULT 'main'")
             else:
-                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status TEXT DEFAULT 'confirmed'")
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN order_group TEXT DEFAULT 'main'")
             conn.commit()
-            print("Status column added successfully")
+            print("order_group column added successfully")
         else:
-            print("Status column already exists")
+            print("order_group column already exists")
             
     except Exception as e:
         print(f"Schema update error: {e}")
@@ -485,7 +485,8 @@ class OrderSession:
         self.last_activity = time.time()
         self.waiting_for_option = False
 
-    def _save_final_orders(self, orders_list, status="confirmed"):
+    def _save_final_orders(self, orders_list, status="confirmed", order_group="main"):
+        """Save orders with order_group support"""
         conn = get_db_connection()
         cur = conn.cursor()
         
@@ -496,16 +497,14 @@ class OrderSession:
             for product, qty in order.items():
                 if qty > 0:
                     if is_postgres:
-                        # PostgreSQL uses %s placeholders
                         cur.execute(
-                            'INSERT INTO confirmed_orders (session_id, product, quantity, status) VALUES (%s, %s, %s, %s)',
-                            (self.session_id, product, qty, status)
+                            'INSERT INTO confirmed_orders (session_id, product, quantity, status, order_group) VALUES (%s, %s, %s, %s, %s)',
+                            (self.session_id, product, qty, status, order_group)
                         )
                     else:
-                        # SQLite uses ? placeholders
                         cur.execute(
-                            'INSERT INTO confirmed_orders (session_id, product, quantity, status) VALUES (?, ?, ?, ?)',
-                            (self.session_id, product, qty, status)
+                            'INSERT INTO confirmed_orders (session_id, product, quantity, status, order_group) VALUES (?, ?, ?, ?, ?)',
+                            (self.session_id, product, qty, status, order_group)
                         )
         
         conn.commit()
@@ -513,32 +512,78 @@ class OrderSession:
         conn.close()
 
     def get_global_orders(self):
-        """Get all confirmed orders from database (for sidebar display)"""
+        """Get all confirmed orders from database with separate auto-confirmed groups"""
         conn = get_db_connection()
         cur = conn.cursor()
         
         # Check if we're using PostgreSQL or SQLite
         is_postgres = os.environ.get('DATABASE_URL') is not None
         
+        # Get main confirmed orders (blue boxes)
         if is_postgres:
-            cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders WHERE status = %s GROUP BY product ORDER BY total_quantity DESC', ('confirmed',))
+            cur.execute('''
+                SELECT product, SUM(quantity) as total_quantity 
+                FROM confirmed_orders 
+                WHERE status = %s AND order_group = %s 
+                GROUP BY product 
+                ORDER BY total_quantity DESC
+            ''', ('confirmed', 'main'))
         else:
-            cur.execute('SELECT product, SUM(quantity) as total_quantity FROM confirmed_orders WHERE status = ? GROUP BY product ORDER BY total_quantity DESC', ('confirmed',))
+            cur.execute('''
+                SELECT product, SUM(quantity) as total_quantity 
+                FROM confirmed_orders 
+                WHERE status = ? AND order_group = ? 
+                GROUP BY product 
+                ORDER BY total_quantity DESC
+            ''', ('confirmed', 'main'))
         
-        orders_data = cur.fetchall()
+        main_orders_data = cur.fetchall()
         
-        # Always access by index - works for both SQLite and PostgreSQL
-        orders = {}
-        for row in orders_data:
-            product = row[0]      # First column
-            quantity = row[1]     # Second column
+        # Get auto-confirmed order groups (yellow boxes)
+        if is_postgres:
+            cur.execute('''
+                SELECT order_group, product, quantity 
+                FROM confirmed_orders 
+                WHERE status = %s AND order_group != %s 
+                ORDER BY order_group, product
+            ''', ('auto_confirmed', 'main'))
+        else:
+            cur.execute('''
+                SELECT order_group, product, quantity 
+                FROM confirmed_orders 
+                WHERE status = ? AND order_group != ? 
+                ORDER BY order_group, product
+            ''', ('auto_confirmed', 'main'))
+        
+        auto_orders_data = cur.fetchall()
+        
+        # Process main orders (blue)
+        main_orders = {}
+        for row in main_orders_data:
+            product = row[0]
+            quantity = row[1]
             if product and quantity:
-                orders[product] = quantity
+                main_orders[product] = quantity
+        
+        # Process auto orders (yellow boxes grouped by order_group)
+        auto_orders = {}
+        for row in auto_orders_data:
+            order_group = row[0]
+            product = row[1]
+            quantity = row[2]
+            
+            if order_group not in auto_orders:
+                auto_orders[order_group] = {}
+            
+            auto_orders[order_group][product] = quantity
         
         cur.close()
         conn.close()
         
-        return orders
+        return {
+            'main_orders': main_orders,
+            'auto_orders': auto_orders
+        }
 
     def get_all_orders_summary(self):
         """Get summary of all orders from database (for Excel download)"""
@@ -630,14 +675,17 @@ class OrderSession:
                 
     
     def _mark_as_pending(self):
-        """Mark current order as pending"""
+        """Mark current order as auto-confirmed with unique order group"""
         if self.has_items():
-            pending_order = self.get_current_orders()
-            self.pending_orders.append(pending_order)
-            self.message_queue.put("🟡 **PEDIDO MARCADO COMO PENDENTE** - Aguardando confirmação.\n\nDigite 'confirmar' para confirmar este pedido.")
+            auto_order = self.get_current_orders()
+            # Generate unique order group ID
+            order_group_id = f"auto_{int(time.time())}_{self.session_id}"
+            
+            # Save as auto-confirmed with unique group
+            self._save_final_orders([auto_order], status="auto_confirmed", order_group=order_group_id)
+            self.message_queue.put("🟡 **PEDIDO CONFIRMADO AUTOMATICAMENTE** - O pedido foi salvo e aguarda sua confirmação final na barra lateral.")
             self._reset_current()
-            self.state = "pending_confirmation"
-            self._save_final_orders([pending_order], status="pending")
+            self.state = "waiting_for_next"  # Go back to waiting_for_next state
 
 
 
@@ -929,23 +977,58 @@ def get_orders():
         'pending_orders': session.pending_orders
     })
 
-@app.route("/confirm_pending_order", methods=["POST"])
-def confirm_pending_order():
+@app.route("/confirm_auto_order", methods=["POST"])
+def confirm_auto_order():
+    """Move auto-confirmed order to main confirmed orders"""
     data = request.json
-    session_id = data.get("session_id", "default")
-    order_index = data.get("order_index", 0)
+    order_group = data.get("order_group")
     
-    session = get_user_session(session_id)
+    conn = get_db_connection()
+    cur = conn.cursor()
     
-    if session.pending_orders and order_index < len(session.pending_orders):
-        # Move from pending to confirmed
-        confirmed_order = session.pending_orders.pop(order_index)
-        session.confirmed_orders.append(confirmed_order)
-        session._save_final_orders([confirmed_order])
-        
-        return jsonify({'success': True})
+    # Check if we're using PostgreSQL or SQLite
+    is_postgres = os.environ.get('DATABASE_URL') is not None
+    
+    if is_postgres:
+        # Update status and order_group to move to main orders
+        cur.execute(
+            'UPDATE confirmed_orders SET status = %s, order_group = %s WHERE order_group = %s AND status = %s',
+            ('confirmed', 'main', order_group, 'auto_confirmed')
+        )
     else:
-        return jsonify({'success': False, 'message': 'Pedido pendente não encontrado'})
+        cur.execute(
+            'UPDATE confirmed_orders SET status = ?, order_group = ? WHERE order_group = ? AND status = ?',
+            ('confirmed', 'main', order_group, 'auto_confirmed')
+        )
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return jsonify({'success': True})
+
+@app.route("/delete_auto_order", methods=["POST"])
+def delete_auto_order():
+    """Delete an auto-confirmed order group"""
+    data = request.json
+    order_group = data.get("order_group")
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Check if we're using PostgreSQL or SQLite
+    is_postgres = os.environ.get('DATABASE_URL') is not None
+    
+    if is_postgres:
+        cur.execute('DELETE FROM confirmed_orders WHERE order_group = %s AND status = %s', (order_group, 'auto_confirmed'))
+    else:
+        cur.execute('DELETE FROM confirmed_orders WHERE order_group = ? AND status = ?', (order_group, 'auto_confirmed'))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return jsonify({'success': True})
 
 @app.route("/confirm_order", methods=["POST"])
 def confirm_order():
