@@ -8,9 +8,10 @@ import threading
 import uuid
 import queue
 import time
+import random
+import string
 from openpyxl import Workbook
 from io import BytesIO
-
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY')
 
@@ -44,12 +45,12 @@ def update_db_schema():
     is_postgres = os.environ.get('DATABASE_URL') is not None
     
     try:
-        # Check if order_group column exists
+        # Check if status column exists
         if is_postgres:
             cur.execute("""
                 SELECT column_name 
                 FROM information_schema.columns 
-                WHERE table_name='confirmed_orders' and column_name='order_group'
+                WHERE table_name='confirmed_orders' and column_name='status'
             """)
         else:
             cur.execute("PRAGMA table_info(confirmed_orders)")
@@ -58,12 +59,51 @@ def update_db_schema():
         if is_postgres:
             column_exists = cur.fetchone() is not None
         else:
-            column_exists = 'order_group' in columns
+            column_exists = 'status' in columns
             
         if not column_exists:
+            print("Adding status column to confirmed_orders table...")
+            if is_postgres:
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status VARCHAR(20) DEFAULT 'confirmed'")
+            else:
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN status TEXT DEFAULT 'confirmed'")
+            conn.commit()
+            print("Status column added successfully")
+        else:
+            print("Status column already exists")
+            
+        # Check if order_group column exists and its type
+        if is_postgres:
+            cur.execute("""
+                SELECT column_name, data_type, character_maximum_length
+                FROM information_schema.columns 
+                WHERE table_name='confirmed_orders' and column_name='order_group'
+            """)
+        else:
+            cur.execute("PRAGMA table_info(confirmed_orders)")
+            columns = {row[1]: row for row in cur.fetchall()}
+        
+        if is_postgres:
+            order_group_info = cur.fetchone()
+            order_group_exists = order_group_info is not None
+            if order_group_exists:
+                current_type = order_group_info[1]
+                current_length = order_group_info[2]
+                print(f"order_group column exists: {current_type}({current_length})")
+                
+                # If it's varchar(50), let's alter it to varchar(255)
+                if current_type == 'character varying' and current_length == 50:
+                    print("Altering order_group column from VARCHAR(50) to VARCHAR(255)...")
+                    cur.execute("ALTER TABLE confirmed_orders ALTER COLUMN order_group TYPE VARCHAR(255)")
+                    conn.commit()
+                    print("order_group column altered to VARCHAR(255) successfully")
+        else:
+            order_group_exists = 'order_group' in columns
+            
+        if not order_group_exists:
             print("Adding order_group column to confirmed_orders table...")
             if is_postgres:
-                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN order_group VARCHAR(50) DEFAULT 'main'")
+                cur.execute("ALTER TABLE confirmed_orders ADD COLUMN order_group VARCHAR(255) DEFAULT 'main'")
             else:
                 cur.execute("ALTER TABLE confirmed_orders ADD COLUMN order_group TEXT DEFAULT 'main'")
             conn.commit()
@@ -96,6 +136,7 @@ def init_db():
                     product VARCHAR(255) NOT NULL,
                     quantity INTEGER NOT NULL,
                     status VARCHAR(20) DEFAULT 'pending',
+                    order_group VARCHAR(255) DEFAULT 'main',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -108,6 +149,7 @@ def init_db():
                     product TEXT NOT NULL,
                     quantity INTEGER NOT NULL,
                     status TEXT DEFAULT 'pending',
+                    order_group TEXT DEFAULT 'main',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -678,15 +720,18 @@ class OrderSession:
         """Mark current order as auto-confirmed with unique order group"""
         if self.has_items():
             auto_order = self.get_current_orders()
-            # Generate unique order group ID
-            order_group_id = f"auto_{int(time.time())}_{self.session_id}"
+            # Generate shorter unique order group ID
+            import random
+            import string
+            timestamp = str(int(time.time()))[-6:]  # Last 6 digits of timestamp
+            random_part = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
+            order_group_id = f"auto_{timestamp}_{random_part}"
             
             # Save as auto-confirmed with unique group
             self._save_final_orders([auto_order], status="auto_confirmed", order_group=order_group_id)
             self.message_queue.put("🟡 **PEDIDO CONFIRMADO AUTOMATICAMENTE** - O pedido foi salvo e aguarda sua confirmação final na barra lateral.")
             self._reset_current()
             self.state = "waiting_for_next"  # Go back to waiting_for_next state
-
 
 
     
