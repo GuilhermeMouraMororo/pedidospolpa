@@ -165,6 +165,12 @@ def init_db():
 init_db()
 update_db_schema()
 
+
+
+
+
+
+
 # ---------- Core Order Processing Functions (UNCHANGED) ----------
 # [Keep all your existing functions: normalize, levenshtein_distance, similarity_percentage, 
 #  parse_number_words, separate_numbers_and_words, extract_numbers_and_positions, 
@@ -302,21 +308,27 @@ def extract_numbers_and_positions(tokens):
             
     return numbers
 
-def find_associated_number(product_position, all_tokens, numbers_with_positions):
+def find_associated_number(product_position, all_tokens, numbers_with_positions, used_number_positions):
     """Find the number associated with a product based on word order patterns"""
     if not numbers_with_positions:
+        return 1, None
+    
+    # Filter out used numbers
+    available_numbers = [(pos, val) for pos, val in numbers_with_positions if pos not in used_number_positions]
+    
+    if not available_numbers:
         return 1, None
     
     # Pattern 1: Number immediately before the product (most common)
     if product_position > 0:
         prev_token = all_tokens[product_position - 1]
         if prev_token.isdigit() or prev_token in word2num_all:
-            for pos, val in numbers_with_positions:
+            for pos, val in available_numbers:
                 if pos == product_position - 1:
                     return val, pos
     
     # Pattern 2: Look for numbers before the product (anywhere before)
-    numbers_before = [(pos, val) for pos, val in numbers_with_positions if pos < product_position]
+    numbers_before = [(pos, val) for pos, val in available_numbers if pos < product_position]
     if numbers_before:
         # Return the closest number before the product (highest position number before product)
         closest_before = max(numbers_before, key=lambda x: x[0])
@@ -326,12 +338,12 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions)
     if product_position + 1 < len(all_tokens):
         next_token = all_tokens[product_position + 1]
         if next_token.isdigit() or next_token in word2num_all:
-            for pos, val in numbers_with_positions:
+            for pos, val in available_numbers:
                 if pos == product_position + 1:
                     return val, pos
     
     # Pattern 4: Look for numbers after the product (anywhere after)
-    numbers_after = [(pos, val) for pos, val in numbers_with_positions if pos > product_position]
+    numbers_after = [(pos, val) for pos, val in available_numbers if pos > product_position]
     if numbers_after:
         # Return the closest number after the product (lowest position number after product)
         closest_after = min(numbers_after, key=lambda x: x[0])
@@ -350,7 +362,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
     message = re.sub(r"\s+", " ", message).strip()
 
     tokens = message.split()
-    
+
     # Start with the current database state (accumulate items)
     working_db = deepcopy(products_db)
     parsed_orders = []
@@ -371,7 +383,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
             product_words.add(normalize(word))
 
     used_positions = set()  # Track used token positions
-    used_numbers = set()    # Track used number positions
+    used_number_positions = set()    # Track used number positions
 
     i = 0
     while i < len(tokens):
@@ -427,17 +439,8 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
 
             # Handle the match
             if best_score >= similarity_threshold:
-                # Find associated number for this product
-                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions)
-                
-                # If number position is already used, try to find another number
-                if number_position is not None and number_position in used_numbers:
-                    # Look for any unused number
-                    for pos, val in numbers_with_positions:
-                        if pos not in used_numbers:
-                            quantity = val
-                            number_position = pos
-                            break
+                # Find associated number for this product (pass used_number_positions)
+                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions, used_number_positions)
                 
                 # Update the working database (add to existing quantity)
                 working_db[best_original_idx][1] += quantity
@@ -447,7 +450,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                 for j in range(size):
                     used_positions.add(i + j)
                 if number_position is not None:
-                    used_numbers.add(number_position)
+                    used_number_positions.add(number_position)  # Mark this number as used
                 
                 i += size
                 matched = True
@@ -470,15 +473,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
             
             if best_match and best_score > 50:
                 # Auto-confirm reasonable matches for web version
-                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions)
-                
-                # If number position is already used, try to find another number
-                if number_position is not None and number_position in used_numbers:
-                    for pos, val in numbers_with_positions:
-                        if pos not in used_numbers:
-                            quantity = val
-                            number_position = pos
-                            break
+                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions, used_number_positions)
                 
                 # Update the working database (add to existing quantity)
                 working_db[best_original_idx][1] += quantity
@@ -490,7 +485,7 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                         
                 used_positions.add(i)
                 if number_position is not None:
-                    used_numbers.add(number_position)
+                    used_number_positions.add(number_position)  # Mark this number as used
                 
                 matched = True
             
@@ -508,6 +503,11 @@ products_db = [
     ["caixa de ovos", 0], ["ovo", 0], ["queijo", 0]
 ]
 
+
+
+
+
+
 # ---------- Enhanced OrderBot with Database Persistence ----------
 user_sessions = {}
 session_lock = threading.Lock()
@@ -520,7 +520,7 @@ class OrderSession:
         self.confirmed_orders = []
         self.pending_orders = []
         
-        self.state = "collecting"
+        self.state = "waiting_for_next"
         self.reminder_count = 0
         self.message_queue = queue.Queue()
         self.active_timer = None
@@ -671,7 +671,7 @@ class OrderSession:
     def _start_inactivity_timer(self):
         """Start 30-second inactivity timer"""
         self._cancel_timer()
-        self.active_timer = threading.Timer(5.0, self._send_summary)
+        self.active_timer = threading.Timer(30.0, self._send_summary)
         self.active_timer.daemon = True
         self.active_timer.start()
     
@@ -696,7 +696,7 @@ class OrderSession:
         """Start reminder cycle - first reminder after 30 seconds"""
         self.reminder_count = 1
         self._cancel_timer()
-        self.active_timer = threading.Timer(5.0, self._send_reminder)
+        self.active_timer = threading.Timer(30.0, self._send_reminder)
         self.active_timer.daemon = True
         self.active_timer.start()
 
@@ -711,7 +711,7 @@ class OrderSession:
             else:
                 self.reminder_count += 1
                 self._cancel_timer()
-                self.active_timer = threading.Timer(5.0, self._send_reminder)
+                self.active_timer = threading.Timer(30.0, self._send_reminder)
                 self.active_timer.daemon = True
                 self.active_timer.start()
                 
@@ -984,6 +984,8 @@ def send_message():
         'pending_orders': session.pending_orders
     }
     
+
+    # estude melhor isso aqui:
     if result.get('message'):
         response['bot_message'] = result['message']
     
@@ -993,6 +995,7 @@ def send_message():
 def get_updates():
     """Get updates including pending messages and session state"""
     data = request.json
+    print(data)
     session_id = data.get("session_id", "default")
     
     session = get_user_session(session_id)
