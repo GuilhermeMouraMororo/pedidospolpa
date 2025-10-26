@@ -319,7 +319,7 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions,
     if not available_numbers:
         return 1, None
     
-    # Pattern 1: Number immediately before the product (most common)
+    # **PRIORITY 1: Number immediately before the product (most common pattern in Portuguese)**
     if product_position > 0:
         prev_token = all_tokens[product_position - 1]
         if prev_token.isdigit() or prev_token in word2num_all:
@@ -327,14 +327,14 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions,
                 if pos == product_position - 1:
                     return val, pos
     
-    # Pattern 2: Look for numbers before the product (anywhere before)
+    # **PRIORITY 2: Look for the closest number that comes BEFORE the product**
     numbers_before = [(pos, val) for pos, val in available_numbers if pos < product_position]
     if numbers_before:
         # Return the closest number before the product (highest position number before product)
         closest_before = max(numbers_before, key=lambda x: x[0])
         return closest_before[1], closest_before[0]
     
-    # Pattern 3: Number immediately after the product
+    # **PRIORITY 3: Number immediately after the product (less common)**
     if product_position + 1 < len(all_tokens):
         next_token = all_tokens[product_position + 1]
         if next_token.isdigit() or next_token in word2num_all:
@@ -342,7 +342,7 @@ def find_associated_number(product_position, all_tokens, numbers_with_positions,
                 if pos == product_position + 1:
                     return val, pos
     
-    # Pattern 4: Look for numbers after the product (anywhere after)
+    # **PRIORITY 4: Look for numbers after the product (least preferred)**
     numbers_after = [(pos, val) for pos, val in available_numbers if pos > product_position]
     if numbers_after:
         # Return the closest number after the product (lowest position number after product)
@@ -385,6 +385,10 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
     used_positions = set()  # Track used token positions
     used_number_positions = set()    # Track used number positions
 
+    # Create a list to store all potential product matches with their positions
+    potential_matches = []
+    
+    # First pass: find all potential product matches and their positions
     i = 0
     while i < len(tokens):
         if i in used_positions:
@@ -439,18 +443,17 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
 
             # Handle the match
             if best_score >= similarity_threshold:
-                # Find associated number for this product (pass used_number_positions)
-                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions, used_number_positions)
+                potential_matches.append({
+                    'start_pos': i,
+                    'end_pos': i + size - 1,
+                    'product': best_product,
+                    'original_idx': best_original_idx,
+                    'score': best_score
+                })
                 
-                # Update the working database (add to existing quantity)
-                working_db[best_original_idx][1] += quantity
-                parsed_orders.append({"product": best_product, "qty": quantity, "score": round(best_score,2)})
-                
-                # Mark positions as used
+                # Mark positions as used for this iteration
                 for j in range(size):
                     used_positions.add(i + j)
-                if number_position is not None:
-                    used_number_positions.add(number_position)  # Mark this number as used
                 
                 i += size
                 matched = True
@@ -472,24 +475,75 @@ def parse_order_interactive(message, products_db, similarity_threshold=80, uncer
                     best_original_idx = idx
             
             if best_match and best_score > 50:
-                # Auto-confirm reasonable matches for web version
-                quantity, number_position = find_associated_number(i, tokens, numbers_with_positions, used_number_positions)
-                
-                # Update the working database (add to existing quantity)
-                working_db[best_original_idx][1] += quantity
-                parsed_orders.append({
-                    "product": best_match,
-                    "qty": quantity,
-                    "score": round(best_score, 2)
+                potential_matches.append({
+                    'start_pos': i,
+                    'end_pos': i,
+                    'product': best_match,
+                    'original_idx': best_original_idx,
+                    'score': best_score
                 })
                         
                 used_positions.add(i)
-                if number_position is not None:
-                    used_number_positions.add(number_position)  # Mark this number as used
-                
                 matched = True
             
             i += 1
+
+    # Reset used_positions for the second pass
+    used_positions.clear()
+    
+    # **SECOND PASS: Process matches in order of their relationship to numbers**
+    # Sort potential matches by their proximity to available numbers
+    def get_match_priority(match):
+        start_pos = match['start_pos']
+        
+        # Check for number immediately before (highest priority)
+        if start_pos > 0:
+            prev_token = tokens[start_pos - 1]
+            if (prev_token.isdigit() or prev_token in word2num_all) and (start_pos - 1) not in used_number_positions:
+                return 0  # Highest priority
+        
+        # Check for any number before
+        numbers_before = [pos for pos, _ in numbers_with_positions if pos < start_pos and pos not in used_number_positions]
+        if numbers_before:
+            return 1
+        
+        # Check for number immediately after
+        if start_pos + 1 < len(tokens):
+            next_token = tokens[start_pos + 1]
+            if (next_token.isdigit() or next_token in word2num_all) and (start_pos + 1) not in used_number_positions:
+                return 2
+        
+        # Check for any number after
+        numbers_after = [pos for pos, _ in numbers_with_positions if pos > start_pos and pos not in used_number_positions]
+        if numbers_after:
+            return 3
+        
+        return 4  # No number association
+    
+    # Sort matches by priority
+    potential_matches.sort(key=get_match_priority)
+    
+    # Process matches in priority order
+    for match in potential_matches:
+        quantity, number_position = find_associated_number(
+            match['start_pos'], tokens, numbers_with_positions, used_number_positions
+        )
+        
+        # Update the working database (add to existing quantity)
+        working_db[match['original_idx']][1] += quantity
+        parsed_orders.append({
+            "product": match['product'], 
+            "qty": quantity, 
+            "score": round(match['score'], 2)
+        })
+        
+        # Mark product positions as used
+        for pos in range(match['start_pos'], match['end_pos'] + 1):
+            used_positions.add(pos)
+        
+        # Mark number as used if one was found
+        if number_position is not None:
+            used_number_positions.add(number_position)
 
     return parsed_orders, working_db
 
