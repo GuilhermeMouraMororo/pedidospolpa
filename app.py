@@ -990,15 +990,30 @@ def index():
 def download_excel():
     """Generate Excel file from database"""
     session = OrderSession("global")
-    orders = session.get_all_orders_summary()
+    orders_data = session.get_all_orders_summary()
     
     # Create Excel file in memory
     wb = Workbook()
     ws = wb.active
-    ws.append(["Produto", "Quantidade"])
+    ws.title = "Pedidos"
     
-    for product, quantity in orders.items():
-        ws.append([product, quantity])
+    # Add headers
+    ws.append(["Produto", "Quantidade", "Tipo"])
+    
+    # Process main_orders (confirmed orders)
+    if "main_orders" in orders_data and orders_data["main_orders"]:
+        for product, quantity in orders_data["main_orders"].items():
+            ws.append([product, quantity, "Confirmado"])
+    
+    # Process auto_orders (auto-confirmed orders)
+    if "auto_orders" in orders_data and orders_data["auto_orders"]:
+        for order_group, products in orders_data["auto_orders"].items():
+            for product, quantity in products.items():
+                ws.append([product, quantity, f"Auto-Confirmado ({order_group})"])
+    
+    # If no orders at all, add a message
+    if ws.max_row == 1:  # Only header row exists
+        ws.append(["Nenhum pedido encontrado", "", ""])
     
     # Save to BytesIO object
     excel_file = BytesIO()
